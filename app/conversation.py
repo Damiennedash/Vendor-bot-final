@@ -1,6 +1,12 @@
-import json
-import os
 from datetime import datetime, timedelta
+
+from .repository import (
+    load_bot_session,
+    load_vendor_memory,
+    save_bot_session,
+    save_vendor,
+    update_vendor_sales,
+)
 
 BRAND = "FANMILK TOGO"
 
@@ -40,30 +46,7 @@ MOTS_INVALIDES = [
     "bonjour fanmilk togo", "bonsoir fanmilk togo", "fanmilk",
 ]
 
-_SESSIONS_FILE = "/tmp/sessions.json"
-
-
-def _load_sessions():
-    try:
-        if os.path.exists(_SESSIONS_FILE):
-            with open(_SESSIONS_FILE, "r") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return {}
-
-
-def _save_sessions(sessions):
-    try:
-        with open(_SESSIONS_FILE, "w") as f:
-            json.dump(sessions, f)
-    except Exception:
-        pass
-
-
-SESSIONS = _load_sessions()
-
-from .sheets import load_vendor_memory, save_vendor, update_vendor_sales
+SESSIONS = {}
 
 VENDOR_MEMORY = None
 
@@ -164,18 +147,18 @@ def _menu_probleme():
 
 def get_session(phone):
     if phone not in SESSIONS:
-        SESSIONS[phone] = {"step": "start", "data": {}}
+        SESSIONS[phone] = load_bot_session(phone) or {"step": "start", "data": {}}
     return SESSIONS[phone]
 
 
 def reset_session(phone):
     SESSIONS[phone] = {"step": "start", "data": {}}
-    _save_sessions(SESSIONS)
+    save_bot_session(phone, SESSIONS[phone])
 
 
 def handle_message(phone, body):
     result = _handle_inner(phone, body)
-    _save_sessions(SESSIONS)
+    save_bot_session(phone, SESSIONS[phone])
     return result
 
 
