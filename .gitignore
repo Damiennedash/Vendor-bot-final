@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# Environment and secrets
+.env
+vendor-checkin-*.json
+*.pem
+*.key
+credentials*.json
+secrets*.json
+
+# OS files
+Thumbs.db
+.DS_Store
