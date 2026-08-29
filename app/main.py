@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Vendor Daily Check-In - WhatsApp Webhook
-Stack : Flask + WhatsApp Cloud API + MySQL
+Stack : Flask + WhatsApp Cloud API + PostgreSQL
 """
 import hashlib
 import hmac
@@ -9,11 +9,13 @@ import logging
 import os
 
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 from sqlalchemy import text
 
 from .conversation import handle_message
-from .extensions import db
+from .extensions import db, jwt
+from .models import Depot, Product, User
 from .repository import append_declaration, claim_message, release_message
 
 load_dotenv()
@@ -21,12 +23,25 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv(
-    "DATABASE_URL", "mysql+pymysql://fanmilk:fanmilk@localhost:3306/fanmilk"
-)
+database_url = os.getenv("DATABASE_URL", "postgresql+psycopg://fanmilk:fanmilk@localhost:5432/fanmilk")
+if database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql+psycopg://", 1)
+elif database_url.startswith("postgresql://"):
+    database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True, "pool_recycle": 280}
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "development-only-secret-key-at-least-32-characters")
+app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", app.config["SECRET_KEY"])
 db.init_app(app)
+jwt.init_app(app)
+CORS(
+    app,
+    resources={r"/api/*": {"origins": [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")]}},
+    allow_headers=["Content-Type", "Authorization"],
+)
+from .api import api
+app.register_blueprint(api)
 
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "mon_token_secret")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
@@ -34,9 +49,31 @@ META_APP_SECRET = os.getenv("META_APP_SECRET")
 
 @app.cli.command("init-db")
 def init_db_command():
-    """Cree les tables MySQL necessaires."""
+    """Cree les tables PostgreSQL et les donnees de reference."""
     db.create_all()
-    print("Base MySQL initialisee.")
+    depot_names = ["GERM DOSSEH", "SUPER DEPOT", "NBUKE RAMCO", "NADONIELLA A", "SAINT MARTIN", "YEHONAM"]
+    for name in depot_names:
+        if not Depot.query.filter_by(name=name).first():
+            db.session.add(Depot(name=name, location="Lome, Togo"))
+    for sku, name in (("FANXTRA", "FanXtra"), ("FANCHOCO", "FanChoco"), ("FANVANILLE", "FanVanille")):
+        if not Product.query.filter_by(sku=sku).first():
+            db.session.add(Product(sku=sku, name=name))
+    db.session.flush()
+    admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()
+    admin_password = os.getenv("ADMIN_PASSWORD", "")
+    if admin_email and admin_password and not User.query.filter_by(email=admin_email).first():
+        admin = User(name="Administrateur FanMilk", email=admin_email, role="administrateur")
+        admin.set_password(admin_password)
+        db.session.add(admin)
+    depositaire_email = os.getenv("DEPOSITAIRE_EMAIL", "").strip().lower()
+    depositaire_password = os.getenv("DEPOSITAIRE_PASSWORD", "")
+    if depositaire_email and depositaire_password and not User.query.filter_by(email=depositaire_email).first():
+        depot = Depot.query.filter_by(name=depot_names[0]).first()
+        user = User(name="Depositaire GERM DOSSEH", email=depositaire_email, role="depositaire", depot_id=depot.id)
+        user.set_password(depositaire_password)
+        db.session.add(user)
+    db.session.commit()
+    print("Base PostgreSQL initialisee.")
 
 
 def _valid_meta_signature(raw_body, signature):
@@ -67,7 +104,7 @@ def healthz():
         db.session.execute(text("SELECT 1"))
         return jsonify({"status": "ok", "database": "connected"}), 200
     except Exception:
-        logger.exception("Echec du controle MySQL")
+        logger.exception("Echec du controle PostgreSQL")
         return jsonify({"status": "error", "database": "unavailable"}), 503
 
 
@@ -131,10 +168,10 @@ def webhook():
             from .whatsapp import send_message
             send_message(phone, reply)
 
-        # Enregistrer dans MySQL si le parcours est termine
+        # Enregistrer dans PostgreSQL si le parcours est termine
         if completed_row:
             append_declaration(completed_row)
-            logger.info("Declaration enregistree dans MySQL pour {}".format(phone))
+            logger.info("Declaration enregistree dans PostgreSQL pour {}".format(phone))
 
     except Exception as e:
         release_message(message_id)

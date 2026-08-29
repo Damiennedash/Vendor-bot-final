@@ -1,9 +1,44 @@
 services:
   - type: web
     name: vendor-bot
-    env: python
-    runtime: python-3.11.9
+    runtime: python
     plan: free
+    healthCheckPath: /healthz
     region: oregon
     buildCommand: "python -m pip install --upgrade pip setuptools wheel && pip install -r requirements.txt"
     startCommand: "flask --app app.main init-db && gunicorn app.main:app --bind 0.0.0.0:$PORT --workers 2 --threads 4"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DATABASE_URL
+        fromDatabase:
+          name: fanmilk-postgres
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: https://fanmilk-togo-dashboard.djatadamienne5.chatgpt.site,http://localhost:3000
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DEPOSITAIRE_EMAIL
+        sync: false
+      - key: DEPOSITAIRE_PASSWORD
+        sync: false
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_ID
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+
+databases:
+  - name: fanmilk-postgres
+    databaseName: fanmilk
+    user: fanmilk
+    plan: free

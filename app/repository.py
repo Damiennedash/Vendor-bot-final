@@ -3,7 +3,16 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 
 from .extensions import db
-from .models import BotSession, Declaration, ProcessedMessage, Vendor
+from .models import (
+    BotSession,
+    Depot,
+    Difficulty,
+    ProcessedMessage,
+    Product,
+    Sale,
+    SaleLine,
+    Vendor,
+)
 
 
 def _integer(value, default=0):
@@ -13,32 +22,49 @@ def _integer(value, default=0):
         return default
 
 
+def get_or_create_depot(name, location="Togo"):
+    depot = Depot.query.filter_by(name=name).first()
+    if depot is None:
+        depot = Depot(name=name, location=location)
+        db.session.add(depot)
+        db.session.flush()
+    return depot
+
+
+def get_or_create_product(sku, name=None):
+    product = Product.query.filter_by(sku=sku).first()
+    if product is None:
+        product = Product(sku=sku, name=name or sku)
+        db.session.add(product)
+        db.session.flush()
+    return product
+
+
 def load_vendor_memory():
     memory = {}
     for vendor in Vendor.query.all():
         memory[vendor.phone] = {
             "nom": vendor.name,
-            "depot": vendor.depot,
+            "depot": vendor.depot.name,
             "last_montant": str(vendor.last_sales_amount or 0),
             "last_fanxtra": str(vendor.last_fanxtra or 0),
             "last_fanchoco": str(vendor.last_fanchoco or 0),
             "last_fanvanille": str(vendor.last_fanvanille or 0),
             "last_pieces": str(vendor.last_pieces or 0),
-            "last_date": vendor.last_sales_date.strftime("%d/%m/%Y")
-            if vendor.last_sales_date
-            else "",
+            "last_date": vendor.last_sales_date.strftime("%d/%m/%Y") if vendor.last_sales_date else "",
         }
     return memory
 
 
 def save_vendor(phone, nom, depot):
+    depot_row = get_or_create_depot(depot)
     vendor = db.session.get(Vendor, phone)
     if vendor is None:
-        vendor = Vendor(phone=phone, name=nom, depot=depot)
+        vendor = Vendor(phone=phone, name=nom, depot_id=depot_row.id)
         db.session.add(vendor)
     else:
         vendor.name = nom
-        vendor.depot = depot
+        vendor.depot_id = depot_row.id
     vendor.last_declaration_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.session.commit()
 
@@ -46,7 +72,7 @@ def save_vendor(phone, nom, depot):
 def update_vendor_sales(phone, montant, pieces, date, fanxtra="0", fanchoco="0", fanvanille="0"):
     vendor = db.session.get(Vendor, phone)
     if vendor is None:
-        raise ValueError("Vendor inconnu: {}".format(phone))
+        raise ValueError("Revendeur inconnu: {}".format(phone))
     vendor.last_sales_amount = _integer(montant)
     vendor.last_pieces = _integer(pieces)
     vendor.last_fanxtra = _integer(fanxtra)
@@ -58,33 +84,58 @@ def update_vendor_sales(phone, montant, pieces, date, fanxtra="0", fanchoco="0",
 
 def append_declaration(row):
     declared_at = datetime.strptime("{} {}".format(row[0], row[1]), "%d/%m/%Y %H:%M")
-    declaration = Declaration(
+    depot = get_or_create_depot(row[5])
+    vendor = db.session.get(Vendor, row[3])
+    if vendor is None:
+        vendor = Vendor(phone=row[3], name=row[4], depot_id=depot.id)
+        db.session.add(vendor)
+        db.session.flush()
+
+    amount = _integer(row[7])
+    quantities = {
+        "FANXTRA": _integer(row[8]),
+        "FANCHOCO": _integer(row[9]),
+        "FANVANILLE": _integer(row[10]),
+    }
+    sale = Sale(
         declared_at=declared_at,
         period=row[2],
-        vendor_phone=row[3],
-        vendor_name=row[4],
-        depot=row[5],
-        sales_status=row[6],
-        sales_amount=_integer(row[7]),
-        fanxtra=_integer(row[8]),
-        fanchoco=_integer(row[9]),
-        fanvanille=_integer(row[10]),
-        sales_locations=row[11] or "",
-        issue_category=row[12] or "",
-        prime_pillar=row[13] or "",
-        comment=row[14] or "",
-        source=row[15] or "WhatsApp QR",
+        vendor_phone=vendor.phone,
+        depot_id=depot.id,
+        amount=amount,
+        location=row[11] or "",
+        status="en_attente",
+        source=row[15] or "WhatsApp",
     )
-    db.session.add(declaration)
+    db.session.add(sale)
+    db.session.flush()
+
+    total_quantity = sum(quantities.values())
+    names = {"FANXTRA": "FanXtra", "FANCHOCO": "FanChoco", "FANVANILLE": "FanVanille"}
+    for sku, quantity in quantities.items():
+        if quantity <= 0:
+            continue
+        product = get_or_create_product(sku, names[sku])
+        subtotal = round(amount * quantity / total_quantity) if total_quantity else 0
+        db.session.add(SaleLine(sale_id=sale.id, product_id=product.id, quantity=quantity, subtotal=subtotal))
+
+    category = (row[12] or "").strip()
+    if category and category not in {"-", "Aucun probleme"}:
+        db.session.add(Difficulty(
+            vendor_phone=vendor.phone,
+            depot_id=depot.id,
+            category=category,
+            prime_pillar=row[13] or "",
+            description=row[14] or "",
+            reported_at=declared_at,
+        ))
     db.session.commit()
-    return declaration.id
+    return sale.id
 
 
 def load_bot_session(phone):
     session = db.session.get(BotSession, phone)
-    if session is None:
-        return None
-    return {"step": session.step, "data": dict(session.data or {})}
+    return None if session is None else {"step": session.step, "data": dict(session.data or {})}
 
 
 def save_bot_session(phone, state):

@@ -1,16 +1,15 @@
 services:
-  mysql:
-    image: mysql:8.4
+  postgres:
+    image: postgres:16
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: fanmilk
-      MYSQL_USER: fanmilk
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      POSTGRES_DB: fanmilk
+      POSTGRES_USER: fanmilk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - fanmilk_mysql_data:/var/lib/mysql
+      - fanmilk_postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      test: ["CMD-SHELL", "pg_isready -U fanmilk -d fanmilk"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -19,11 +18,18 @@ services:
     build: .
     restart: unless-stopped
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
     environment:
       PORT: 5000
-      DATABASE_URL: mysql+pymysql://fanmilk:${MYSQL_PASSWORD}@mysql:3306/fanmilk
+      DATABASE_URL: postgresql+psycopg://fanmilk:${POSTGRES_PASSWORD}@postgres:5432/fanmilk
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      DEPOSITAIRE_EMAIL: ${DEPOSITAIRE_EMAIL:-}
+      DEPOSITAIRE_PASSWORD: ${DEPOSITAIRE_PASSWORD:-}
       WHATSAPP_TOKEN: ${WHATSAPP_TOKEN}
       WHATSAPP_PHONE_ID: ${WHATSAPP_PHONE_ID}
       WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN}
@@ -32,4 +38,4 @@ services:
       - "5000:5000"
 
 volumes:
-  fanmilk_mysql_data:
+  fanmilk_postgres_data:
