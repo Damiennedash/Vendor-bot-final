@@ -113,3 +113,35 @@ def test_admin_can_create_a_vendor_account_with_phone(client):
     assert response.status_code == 201
     with client.application.app_context():
         assert db.session.get(Vendor, "22893334444") is not None
+
+
+def test_depository_account_ignores_vendor_phone_field(client):
+    with client.application.app_context():
+        _seed_accounts()
+        depot_id = Depot.query.filter_by(name="Depot A").first().id
+    headers = _login(client, "admin@test.tg", "secret123")
+    response = client.post("/api/admin/users", headers=headers, json={
+        "name": "Nouvelle depositaire", "email": "nouvelle-depot@test.tg",
+        "password": "secret123", "role": "depositaire", "depot_id": depot_id,
+        "phone": "22894445555",
+    })
+    assert response.status_code == 201
+    with client.application.app_context():
+        user = User.query.filter_by(email="nouvelle-depot@test.tg").one()
+        assert user.phone is None
+
+
+def test_admin_cannot_reuse_a_vendor_phone(client):
+    with client.application.app_context():
+        _seed_accounts()
+        depot_id = Depot.query.filter_by(name="Depot A").first().id
+    headers = _login(client, "admin@test.tg", "secret123")
+    payload = {
+        "name": "Vendeuse une", "email": "vendeuse1@test.tg", "password": "secret123",
+        "role": "revendeur", "depot_id": depot_id, "phone": "22895556666",
+    }
+    assert client.post("/api/admin/users", headers=headers, json=payload).status_code == 201
+    payload.update({"name": "Vendeuse deux", "email": "vendeuse2@test.tg"})
+    response = client.post("/api/admin/users", headers=headers, json=payload)
+    assert response.status_code == 409
+    assert "telephone" in response.get_json()["error"]

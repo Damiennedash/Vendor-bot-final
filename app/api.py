@@ -4,6 +4,7 @@ from functools import wraps
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import create_access_token, get_jwt, get_jwt_identity, jwt_required
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 
 from .extensions import db
 from .models import Bonus, Depot, Difficulty, Performance, Sale, Stock, User, Vendor, utc_now
@@ -316,24 +317,37 @@ def create_user():
     payload = request.get_json(silent=True) or {}
     role = payload.get("role")
     depot_id = payload.get("depot_id")
+    phone = str(payload.get("phone", "")).strip() or None
     if role not in {"administrateur", "depositaire", "revendeur"}:
         return jsonify({"error": "Role invalide"}), 400
     if role in {"depositaire", "revendeur"} and not depot_id:
         return jsonify({"error": "Le depot est obligatoire pour ce role"}), 400
-    if role == "revendeur" and not str(payload.get("phone", "")).strip():
+    if role == "revendeur" and not phone:
         return jsonify({"error": "Le telephone est obligatoire pour un revendeur"}), 400
     if not all(payload.get(key) for key in ("name", "email", "password")):
         return jsonify({"error": "Nom, email et mot de passe sont obligatoires"}), 400
     if User.query.filter(func.lower(User.email) == str(payload["email"]).lower()).first():
         return jsonify({"error": "Cette adresse existe deja"}), 409
-    user = User(name=payload["name"], email=str(payload["email"]).lower(), phone=str(payload.get("phone", "")).strip() or None, role=role, depot_id=depot_id)
+    if phone and User.query.filter_by(phone=phone).first():
+        return jsonify({"error": "Ce numero de telephone existe deja"}), 409
+    user = User(
+        name=payload["name"],
+        email=str(payload["email"]).lower(),
+        phone=phone if role == "revendeur" else None,
+        role=role,
+        depot_id=depot_id,
+    )
     user.set_password(payload["password"])
     db.session.add(user)
     if role == "revendeur":
         vendor = db.session.get(Vendor, user.phone)
         if vendor is None:
             db.session.add(Vendor(phone=user.phone, name=user.name, depot_id=depot_id))
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "Cette adresse ou ce numero existe deja"}), 409
     return jsonify({"id": user.id}), 201
 
 
