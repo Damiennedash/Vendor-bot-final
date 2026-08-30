@@ -127,7 +127,11 @@ def index():
 def healthz():
     try:
         db.session.execute(text("SELECT 1"))
-        return jsonify({"status": "ok", "database": "connected"}), 200
+        return jsonify({
+            "status": "ok",
+            "database": "connected",
+            "release": os.getenv("RENDER_GIT_COMMIT", "local")[:7],
+        }), 200
     except Exception:
         logger.exception("Echec du controle PostgreSQL")
         return jsonify({"status": "error", "database": "unavailable"}), 503
