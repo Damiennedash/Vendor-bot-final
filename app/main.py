@@ -71,6 +71,15 @@ VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "mon_token_secret")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
 
 
+def _database_provider():
+    host_hint = database_url.lower()
+    if "supabase.co" in host_hint or "supabase.com" in host_hint:
+        return "supabase"
+    if "render.com" in host_hint or "dpg-" in host_hint:
+        return "render"
+    return "local_or_custom"
+
+
 @app.cli.command("init-db")
 def init_db_command():
     """Cree les tables PostgreSQL et les donnees de reference."""
@@ -130,6 +139,7 @@ def healthz():
         return jsonify({
             "status": "ok",
             "database": "connected",
+            "database_provider": _database_provider(),
             "release": os.getenv("RENDER_GIT_COMMIT", "local")[:7],
         }), 200
     except Exception:

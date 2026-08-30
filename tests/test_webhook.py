@@ -26,6 +26,7 @@ def test_health_reports_database_connection(client):
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.get_json()["database"] == "connected"
+    assert response.get_json()["database_provider"] == "local_or_custom"
 
 
 def test_first_message_creates_persistent_session(client, monkeypatch):
