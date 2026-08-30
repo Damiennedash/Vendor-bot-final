@@ -40,6 +40,25 @@ CORS(
     resources={r"/api/*": {"origins": [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")]}},
     allow_headers=["Content-Type", "Authorization"],
 )
+allowed_origins = {
+    item.strip()
+    for item in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+    if item.strip()
+}
+
+
+@app.after_request
+def add_cors_headers(response):
+    """Ajoute explicitement les en-tetes requis par les frontends autorises."""
+    origin = request.headers.get("Origin")
+    if origin in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        response.headers.add("Vary", "Origin")
+    return response
+
+
 from .api import api
 app.register_blueprint(api)
 
