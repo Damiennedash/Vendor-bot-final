@@ -41,10 +41,15 @@ CORS(
     allow_headers=["Content-Type", "Authorization"],
 )
 allowed_origins = {
+    "http://localhost:3000",
+    "https://fanmilk.onrender.com",
+    "https://fanmilk-togo.damiennedash.workers.dev",
+}
+allowed_origins.update({
     item.strip()
     for item in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
     if item.strip()
-}
+})
 
 
 @app.after_request
