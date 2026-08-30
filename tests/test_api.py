@@ -73,6 +73,34 @@ def test_invalid_login_is_rejected(client):
     assert response.status_code == 401
 
 
+def test_user_can_update_own_profile(client):
+    with client.application.app_context():
+        _seed_accounts()
+    headers = _login(client, "admin@test.tg", "secret123")
+    response = client.patch("/api/me", headers=headers, json={
+        "name": "Administratrice FanMilk",
+        "email": "direction@fanmilk.tg",
+        "phone": "+228 90 00 00 00",
+        "password": "nouveau-secret",
+    })
+    assert response.status_code == 200
+    assert response.get_json()["name"] == "Administratrice FanMilk"
+    assert response.get_json()["email"] == "direction@fanmilk.tg"
+    assert _login(client, "direction@fanmilk.tg", "nouveau-secret")
+
+
+def test_profile_email_must_remain_unique(client):
+    with client.application.app_context():
+        _seed_accounts()
+    headers = _login(client, "admin@test.tg", "secret123")
+    response = client.patch(
+        "/api/me",
+        headers=headers,
+        json={"email": "depot@test.tg"},
+    )
+    assert response.status_code == 409
+
+
 def test_admin_can_create_a_vendor_account_with_phone(client):
     with client.application.app_context():
         _seed_accounts()

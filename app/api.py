@@ -119,7 +119,7 @@ def login():
     return jsonify({
         "access_token": token,
         "user": {
-            "id": user.id, "name": user.name, "email": user.email, "role": user.role,
+            "id": user.id, "name": user.name, "email": user.email, "phone": user.phone, "role": user.role,
             "depot": {"id": user.depot.id, "name": user.depot.name, "location": user.depot.location} if user.depot else None,
         },
     })
@@ -138,7 +138,42 @@ def me():
     if not user or not user.active:
         return jsonify({"error": "Compte inactif"}), 401
     return jsonify({
-        "id": user.id, "name": user.name, "email": user.email, "role": user.role,
+        "id": user.id, "name": user.name, "email": user.email, "phone": user.phone, "role": user.role,
+        "depot": {"id": user.depot.id, "name": user.depot.name, "location": user.depot.location} if user.depot else None,
+    })
+
+
+@api.patch("/me")
+@jwt_required()
+def update_me():
+    user = current_user()
+    if not user or not user.active:
+        return jsonify({"error": "Compte inactif"}), 401
+
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name", user.name)).strip()
+    email = str(payload.get("email", user.email)).strip().lower()
+    phone = str(payload.get("phone", user.phone or "")).strip() or None
+    password = str(payload.get("password", ""))
+
+    if not name or not email:
+        return jsonify({"error": "Le nom et l'adresse electronique sont obligatoires"}), 400
+    duplicate = User.query.filter(func.lower(User.email) == email, User.id != user.id).first()
+    if duplicate:
+        return jsonify({"error": "Cette adresse existe deja"}), 409
+    if phone and User.query.filter(User.phone == phone, User.id != user.id).first():
+        return jsonify({"error": "Ce numero de telephone existe deja"}), 409
+    if password and len(password) < 8:
+        return jsonify({"error": "Le nouveau mot de passe doit contenir au moins 8 caracteres"}), 400
+
+    user.name = name
+    user.email = email
+    user.phone = phone
+    if password:
+        user.set_password(password)
+    db.session.commit()
+    return jsonify({
+        "id": user.id, "name": user.name, "email": user.email, "phone": user.phone, "role": user.role,
         "depot": {"id": user.depot.id, "name": user.depot.name, "location": user.depot.location} if user.depot else None,
     })
 
