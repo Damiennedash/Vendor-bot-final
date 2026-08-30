@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 from .repository import (
+    append_declaration,
     load_bot_session,
     load_vendor_memory,
     save_bot_session,
@@ -311,6 +312,11 @@ def _handle_inner(phone, body):
             data.get("fanchoco", "0"),
             body_raw
         )
+        # La vente devient visible des que les chiffres produits sont complets.
+        # La fin du parcours enrichira la meme vente avec le lieu et la difficulte.
+        append_declaration(
+            _build_row(phone, data, "", "WhatsApp - saisie en cours")
+        )
         # Demander le lieu dans tous les cas (hier ou aujourd hui)
         periode = data.get("periode_ventes", "hier")
         session["step"] = "lieu_vente"
@@ -405,7 +411,7 @@ def _handle_inner(phone, body):
     ), None
 
 
-def _build_row(phone, data, commentaire):
+def _build_row(phone, data, commentaire, source="WhatsApp"):
     now = datetime.now()
     periode = "Matin" if now.hour < 13 else "Soir"
     return [
@@ -424,5 +430,5 @@ def _build_row(phone, data, commentaire):
         data.get("categorie", "-"),
         data.get("prime", ""),
         commentaire,
-        "WhatsApp QR",
+        source,
     ]

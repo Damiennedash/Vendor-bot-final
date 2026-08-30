@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
 
@@ -90,6 +90,9 @@ def append_declaration(row):
         vendor = Vendor(phone=row[3], name=row[4], depot_id=depot.id)
         db.session.add(vendor)
         db.session.flush()
+    else:
+        vendor.name = row[4]
+        vendor.depot_id = depot.id
 
     amount = _integer(row[7])
     quantities = {
@@ -97,17 +100,27 @@ def append_declaration(row):
         "FANCHOCO": _integer(row[9]),
         "FANVANILLE": _integer(row[10]),
     }
-    sale = Sale(
-        declared_at=declared_at,
-        period=row[2],
-        vendor_phone=vendor.phone,
-        depot_id=depot.id,
-        amount=amount,
-        location=row[11] or "",
-        status="en_attente",
-        source=row[15] or "WhatsApp",
-    )
-    db.session.add(sale)
+    day_start = datetime.combine(declared_at.date(), time.min)
+    day_end = day_start + timedelta(days=1)
+    sale = Sale.query.filter(
+        Sale.vendor_phone == vendor.phone,
+        Sale.status == "en_attente",
+        Sale.declared_at >= day_start,
+        Sale.declared_at < day_end,
+    ).order_by(Sale.id.desc()).first()
+    if sale is None:
+        sale = Sale(vendor_phone=vendor.phone, status="en_attente")
+        db.session.add(sale)
+    else:
+        for line in list(sale.lines):
+            db.session.delete(line)
+
+    sale.declared_at = declared_at
+    sale.period = row[2]
+    sale.depot_id = depot.id
+    sale.amount = amount
+    sale.location = row[11] or ""
+    sale.source = row[15] or "WhatsApp"
     db.session.flush()
 
     total_quantity = sum(quantities.values())
@@ -120,7 +133,13 @@ def append_declaration(row):
         db.session.add(SaleLine(sale_id=sale.id, product_id=product.id, quantity=quantity, subtotal=subtotal))
 
     category = (row[12] or "").strip()
-    if category and category not in {"-", "Aucun probleme"}:
+    difficulty_exists = Difficulty.query.filter(
+        Difficulty.vendor_phone == vendor.phone,
+        Difficulty.reported_at >= day_start,
+        Difficulty.reported_at < day_end,
+        Difficulty.category == category,
+    ).first()
+    if category and category not in {"-", "Aucun probleme"} and not difficulty_exists:
         db.session.add(Difficulty(
             vendor_phone=vendor.phone,
             depot_id=depot.id,
@@ -131,6 +150,43 @@ def append_declaration(row):
         ))
     db.session.commit()
     return sale.id
+
+
+def recover_missing_sales():
+    """Reconstruit les ventes dont les chiffres ont ete saisis avant une coupure du parcours."""
+    recovered = 0
+    vendors = Vendor.query.filter(Vendor.last_sales_date.isnot(None)).all()
+    for vendor in vendors:
+        day_start = datetime.combine(vendor.last_sales_date, time.min)
+        day_end = day_start + timedelta(days=1)
+        existing = Sale.query.filter(
+            Sale.vendor_phone == vendor.phone,
+            Sale.declared_at >= day_start,
+            Sale.declared_at < day_end,
+        ).first()
+        if existing:
+            continue
+        row = [
+            vendor.last_sales_date.strftime("%d/%m/%Y"),
+            "00:00",
+            "Matin",
+            vendor.phone,
+            vendor.name,
+            vendor.depot.name,
+            "Recuperee apres interruption",
+            str(vendor.last_sales_amount or 0),
+            str(vendor.last_fanxtra or 0),
+            str(vendor.last_fanchoco or 0),
+            str(vendor.last_fanvanille or 0),
+            "A preciser",
+            "-",
+            "",
+            "",
+            "WhatsApp - recuperation automatique",
+        ]
+        append_declaration(row)
+        recovered += 1
+    return recovered
 
 
 def load_bot_session(phone):

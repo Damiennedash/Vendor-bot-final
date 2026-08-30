@@ -16,7 +16,7 @@ from sqlalchemy import text
 from .conversation import handle_message
 from .extensions import db, jwt
 from .models import Depot, Product, User
-from .repository import append_declaration, claim_message, release_message
+from .repository import append_declaration, claim_message, recover_missing_sales, release_message
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -83,6 +83,7 @@ def init_db_command():
         if not Product.query.filter_by(sku=sku).first():
             db.session.add(Product(sku=sku, name=name))
     db.session.flush()
+    recovered_sales = recover_missing_sales()
     admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()
     admin_password = os.getenv("ADMIN_PASSWORD", "")
     if admin_email and admin_password and not User.query.filter_by(email=admin_email).first():
@@ -97,7 +98,7 @@ def init_db_command():
         user.set_password(depositaire_password)
         db.session.add(user)
     db.session.commit()
-    print("Base PostgreSQL initialisee.")
+    print("Base PostgreSQL initialisee. Ventes recuperees : {}.".format(recovered_sales))
 
 
 def _valid_meta_signature(raw_body, signature):
@@ -187,15 +188,15 @@ def webhook():
         # Traiter la conversation
         reply, completed_row = handle_message(phone, body)
 
-        # Envoyer la reponse seulement si elle existe
-        if reply:
-            from .whatsapp import send_message
-            send_message(phone, reply)
-
         # Enregistrer dans PostgreSQL si le parcours est termine
         if completed_row:
             append_declaration(completed_row)
             logger.info("Declaration enregistree dans PostgreSQL pour {}".format(phone))
+
+        # Confirmer uniquement apres l'enregistrement en base de donnees.
+        if reply:
+            from .whatsapp import send_message
+            send_message(phone, reply)
 
     except Exception as e:
         release_message(message_id)
