@@ -2,7 +2,7 @@ from datetime import date
 
 from app.conversation import handle_message
 from app.extensions import db
-from app.models import Depot, Sale, Vendor
+from app.models import BotSession, Depot, Sale, Vendor
 from app.repository import append_declaration, recover_missing_sales
 
 
@@ -52,3 +52,44 @@ def test_recovery_recreates_a_missing_pending_sale(client):
     assert sale.amount == 30000
     assert sale.location == "A preciser"
     assert recover_missing_sales() == 0
+
+
+def test_each_message_reloads_the_authoritative_database_session(client):
+    phone = "22898889999"
+    handle_message(phone, "Bonjour")
+
+    session = db.session.get(BotSession, phone)
+    session.step = "vente_aujourd_hui"
+    session.data = {"nom": "Damienne", "depot": "YEHONAM"}
+    db.session.commit()
+
+    reply, _ = handle_message(phone, "2")
+    assert "*aujourd hui* en FCFA" in reply
+    db.session.expire_all()
+    assert db.session.get(BotSession, phone).step == "ventes_montant"
+
+
+def test_sales_and_difficulty_questions_stay_in_order(client):
+    phone = "22893365551"
+    expected = [
+        ("Bonjour", "Veuillez entrer votre *nom*"),
+        ("DAMIENNE", "Choisissez votre *depot*"),
+        ("6", "Concernant vos ventes *aujourd hui*"),
+        ("2", "aujourd hui* en FCFA"),
+        ("45000", "Combien de *FanXtra*"),
+        ("3", "Combien de *FanChoco*"),
+        ("4", "Combien de *FanVanille*"),
+        ("5", "Ou avez-vous vendu *aujourd hui*"),
+        ("1", "Avez-vous un probleme"),
+        ("1", "Probleme Produit"),
+        ("Ety", "Votre declaration a bien ete enregistree"),
+    ]
+
+    for message, expected_text in expected:
+        reply, completed_row = handle_message(phone, message)
+        assert expected_text in reply
+
+    assert completed_row is not None
+    session = db.session.get(BotSession, phone)
+    assert session.step == "start"
+    assert session.data == {}

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from .repository import (
     append_declaration,
     load_bot_session,
-    load_vendor_memory,
+    load_vendor,
     save_bot_session,
     save_vendor,
     update_vendor_sales,
@@ -47,19 +47,8 @@ MOTS_INVALIDES = [
     "bonjour fanmilk togo", "bonsoir fanmilk togo", "fanmilk",
 ]
 
-SESSIONS = {}
-
-VENDOR_MEMORY = None
-
-
-def _get_memory():
-    global VENDOR_MEMORY
-    if VENDOR_MEMORY is None:
-        try:
-            VENDOR_MEMORY = load_vendor_memory()
-        except Exception:
-            VENDOR_MEMORY = {}
-    return VENDOR_MEMORY
+def _new_session():
+    return {"step": "start", "data": {}}
 
 
 def _matin():
@@ -147,38 +136,43 @@ def _menu_probleme():
 
 
 def get_session(phone):
-    if phone not in SESSIONS:
-        SESSIONS[phone] = load_bot_session(phone) or {"step": "start", "data": {}}
-    return SESSIONS[phone]
+    # PostgreSQL est la source de verite. Un cache Python diverge des qu'un
+    # autre worker Gunicorn traite le message suivant du meme revendeur.
+    return load_bot_session(phone) or _new_session()
 
 
 def reset_session(phone):
-    SESSIONS[phone] = {"step": "start", "data": {}}
-    save_bot_session(phone, SESSIONS[phone])
+    state = _new_session()
+    save_bot_session(phone, state)
+    return state
+
+
+def _reset_state(session):
+    session.clear()
+    session.update(_new_session())
 
 
 def handle_message(phone, body):
-    result = _handle_inner(phone, body)
-    save_bot_session(phone, SESSIONS[phone])
+    session = get_session(phone)
+    result = _handle_inner(phone, body, session)
+    save_bot_session(phone, session)
     return result
 
 
-def _handle_inner(phone, body):
+def _handle_inner(phone, body, session):
     body_raw = body.strip()
     body_low = body_raw.lower()
-    session = get_session(phone)
     step = session["step"]
     data = session["data"]
 
     if body_low == "menu":
-        reset_session(phone)
-        session = get_session(phone)
+        _reset_state(session)
         step = session["step"]
         data = session["data"]
 
     # DECLENCHEUR
     if step == "start":
-        mem = _get_memory().get(phone)
+        mem = load_vendor(phone)
         if mem:
             nom = mem["nom"]
             depot = mem["depot"]
@@ -210,18 +204,13 @@ def _handle_inner(phone, body):
             return _menu_depots(), None
         depot_nom = DEPOTS[body_raw]
         data["depot"] = depot_nom
-        mem = _get_memory()
-        if phone not in mem:
-            mem[phone] = {}
-        mem[phone]["nom"] = data["nom"]
-        mem[phone]["depot"] = depot_nom
         save_vendor(phone, data["nom"], depot_nom)
         session["step"] = "vente_aujourd_hui"
         return "Depot enregistre : *" + depot_nom + "* \u2705\n\n" + _question_vente(), None
 
     # VENTE AUJOURD'HUI
     if step == "vente_aujourd_hui":
-        mem = _get_memory().get(phone, {})
+        mem = load_vendor(phone) or {}
         last_date = mem.get("last_date", "")
         deja_declare = last_date in [_today(), _yesterday()]
 
@@ -294,15 +283,6 @@ def _handle_inner(phone, body):
             + int(data.get("fanchoco", "0"))
             + int(body_raw)
         )
-        mem = _get_memory()
-        if phone not in mem:
-            mem[phone] = {}
-        mem[phone]["last_montant"] = data.get("ventes_montant", "0")
-        mem[phone]["last_fanxtra"] = data.get("fanxtra", "0")
-        mem[phone]["last_fanchoco"] = data.get("fanchoco", "0")
-        mem[phone]["last_fanvanille"] = body_raw
-        mem[phone]["last_pieces"] = total
-        mem[phone]["last_date"] = _today()
         update_vendor_sales(
             phone,
             data.get("ventes_montant", "0"),
@@ -363,12 +343,12 @@ def _handle_inner(phone, body):
 
         if body_raw == "7":
             row = _build_row(phone, data, "")
-            reset_session(phone)
+            _reset_state(session)
             return _au_revoir(nom), row
 
         if body_raw == "6":
             row = _build_row(phone, data, "Demande support direct")
-            reset_session(phone)
+            _reset_state(session)
             return "Un agent vous contactera tres prochainement.\n\n" + _au_revoir(nom), row
 
         session["step"] = "commentaire"
@@ -383,7 +363,7 @@ def _handle_inner(phone, body):
         commentaire = "" if body_raw in ["-", ".", " "] else body_raw
         nom = data.get("nom", "")
         row = _build_row(phone, data, commentaire)
-        reset_session(phone)
+        _reset_state(session)
         return (
             "Merci ! Votre probleme a bien ete recu.\n\n"
             "Notre equipe fera un suivi.\n\n"
@@ -391,10 +371,9 @@ def _handle_inner(phone, body):
         ), row
 
     # FALLBACK
-    reset_session(phone)
-    mem = _get_memory().get(phone)
+    _reset_state(session)
+    mem = load_vendor(phone)
     if mem:
-        session = get_session(phone)
         session["step"] = "vente_aujourd_hui"
         session["data"]["nom"] = mem["nom"]
         session["data"]["depot"] = mem["depot"]
@@ -403,7 +382,6 @@ def _handle_inner(phone, body):
             "Depot : *" + mem["depot"] + "*\n\n"
             + _question_vente()
         ), None
-    session = get_session(phone)
     session["step"] = "nom"
     return (
         _salutation() + " Champion ! Bienvenue sur *" + BRAND + "* Vendor Support. \U0001f3c6\n\n"

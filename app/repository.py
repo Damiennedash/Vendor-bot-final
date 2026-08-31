@@ -56,6 +56,23 @@ def load_vendor_memory():
     return memory
 
 
+def load_vendor(phone):
+    """Charge un profil frais depuis PostgreSQL pour chaque message."""
+    vendor = db.session.get(Vendor, phone)
+    if vendor is None:
+        return None
+    return {
+        "nom": vendor.name,
+        "depot": vendor.depot.name,
+        "last_montant": str(vendor.last_sales_amount or 0),
+        "last_fanxtra": str(vendor.last_fanxtra or 0),
+        "last_fanchoco": str(vendor.last_fanchoco or 0),
+        "last_fanvanille": str(vendor.last_fanvanille or 0),
+        "last_pieces": str(vendor.last_pieces or 0),
+        "last_date": vendor.last_sales_date.strftime("%d/%m/%Y") if vendor.last_sales_date else "",
+    }
+
+
 def save_vendor(phone, nom, depot):
     depot_row = get_or_create_depot(depot)
     vendor = db.session.get(Vendor, phone)

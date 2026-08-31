@@ -99,7 +99,16 @@ def _post(to, payload):
 
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=10)
-        r.raise_for_status()
+        if not r.ok:
+            # Le corps Meta contient le code precis (token, permission ou
+            # numero). Il ne contient jamais le jeton envoye dans l'entete.
+            logger.error(
+                "Echec envoi WhatsApp à %s: HTTP %s - %s",
+                to,
+                r.status_code,
+                r.text[:1000],
+            )
+            return False
         logger.info("Message envoyé à %s OK", to)
         return True
     except requests.RequestException as e:

@@ -53,7 +53,11 @@ def test_first_message_creates_persistent_session(client, monkeypatch):
 
 def test_duplicate_message_is_not_processed_twice(client, monkeypatch):
     sent = []
-    monkeypatch.setattr("app.whatsapp.send_message", lambda phone, reply: sent.append(reply))
+    def fake_send(phone, reply):
+        sent.append(reply)
+        return True
+
+    monkeypatch.setattr("app.whatsapp.send_message", fake_send)
     payload = {
         "entry": [{"changes": [{"value": {"messages": [{
             "id": "wamid.duplicate",
@@ -68,3 +72,31 @@ def test_duplicate_message_is_not_processed_twice(client, monkeypatch):
     assert first.status_code == 200
     assert second.get_json()["status"] == "duplicate"
     assert len(sent) == 1
+
+
+def test_failed_delivery_restores_session_and_allows_meta_retry(client, monkeypatch):
+    monkeypatch.setattr("app.whatsapp.send_message", lambda phone, reply: False)
+    payload = {
+        "entry": [{"changes": [{"value": {"messages": [{
+            "id": "wamid.retry",
+            "from": "22892222222",
+            "type": "text",
+            "text": {"body": "Bonjour"},
+        }]}}]}]
+    }
+    body = json.dumps(payload).encode()
+
+    failed = client.post("/webhook", data=body, headers=_signed_headers(body))
+    assert failed.status_code == 503
+
+    from app.extensions import db
+
+    session = db.session.get(BotSession, "22892222222")
+    assert session.step == "start"
+    assert db.session.get(ProcessedMessage, "wamid.retry") is None
+
+    monkeypatch.setattr("app.whatsapp.send_message", lambda phone, reply: True)
+    retried = client.post("/webhook", data=body, headers=_signed_headers(body))
+    assert retried.status_code == 200
+    db.session.expire_all()
+    assert db.session.get(BotSession, "22892222222").step == "nom"

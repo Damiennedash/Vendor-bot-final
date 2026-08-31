@@ -7,6 +7,8 @@ import hashlib
 import hmac
 import logging
 import os
+from collections import defaultdict
+from threading import Lock
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -16,7 +18,14 @@ from sqlalchemy import text
 from .conversation import handle_message
 from .extensions import db, jwt
 from .models import Depot, Product, User
-from .repository import append_declaration, claim_message, recover_missing_sales, release_message
+from .repository import (
+    append_declaration,
+    claim_message,
+    load_bot_session,
+    recover_missing_sales,
+    release_message,
+    save_bot_session,
+)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -69,6 +78,7 @@ app.register_blueprint(api)
 
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "mon_token_secret")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
+PHONE_LOCKS = defaultdict(Lock)
 
 
 def _database_provider():
@@ -199,18 +209,28 @@ def webhook():
 
         logger.info("Message recu de {}: {}".format(phone, body))
 
-        # Traiter la conversation
-        reply, completed_row = handle_message(phone, body)
+        # Serialiser les messages d'un meme numero. Render utilise plusieurs
+        # threads et Meta peut livrer deux reponses tres rapprochees.
+        with PHONE_LOCKS[phone]:
+            previous_state = load_bot_session(phone) or {"step": "start", "data": {}}
 
-        # Enregistrer dans PostgreSQL si le parcours est termine
-        if completed_row:
-            append_declaration(completed_row)
-            logger.info("Declaration enregistree dans PostgreSQL pour {}".format(phone))
+            # Traiter la conversation
+            reply, completed_row = handle_message(phone, body)
 
-        # Confirmer uniquement apres l'enregistrement en base de donnees.
-        if reply:
-            from .whatsapp import send_message
-            send_message(phone, reply)
+            # Enregistrer dans PostgreSQL si le parcours est termine
+            if completed_row:
+                append_declaration(completed_row)
+                logger.info("Declaration enregistree dans PostgreSQL pour {}".format(phone))
+
+            # Ne jamais avancer silencieusement si le revendeur n'a pas recu
+            # la question suivante. Meta pourra alors relivrer le message.
+            if reply:
+                from .whatsapp import send_message
+                if not send_message(phone, reply):
+                    save_bot_session(phone, previous_state)
+                    release_message(message_id)
+                    logger.error("Session restauree apres echec d'envoi pour %s", phone)
+                    return jsonify({"status": "delivery_failed"}), 503
 
     except Exception as e:
         release_message(message_id)
