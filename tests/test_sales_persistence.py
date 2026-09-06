@@ -80,7 +80,7 @@ def test_sales_and_difficulty_questions_stay_in_order(client):
         ("3", "Combien de *FanChoco*"),
         ("4", "Combien de *FanVanille*"),
         ("5", "Ou avez-vous vendu *aujourd hui*"),
-        ("1", "Avez-vous un probleme"),
+        ("1", "probleme *au cours de la journee*"),
         ("1", "Probleme Produit"),
         ("Ety", "Votre declaration a bien ete enregistree"),
     ]

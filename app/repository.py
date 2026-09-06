@@ -110,6 +110,7 @@ def append_declaration(row):
     else:
         vendor.name = row[4]
         vendor.depot_id = depot.id
+    vendor.last_declaration_at = declared_at
 
     amount = _integer(row[7])
     quantities = {

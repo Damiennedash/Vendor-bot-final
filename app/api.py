@@ -37,6 +37,96 @@ def vendor_data(vendor):
     return {"phone": vendor.phone, "name": vendor.name, "active": vendor.active}
 
 
+def user_data(user):
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "phone": user.phone,
+        "role": user.role,
+        "active": user.active,
+        "depot": {"id": user.depot.id, "name": user.depot.name} if user.depot else None,
+    }
+
+
+def month_bounds(value):
+    """Retourne le debut du mois demande et celui du mois suivant."""
+    try:
+        start = datetime.strptime(value or date.today().strftime("%Y-%m"), "%Y-%m")
+    except ValueError:
+        return None
+    if start.month == 12:
+        end = datetime(start.year + 1, 1, 1)
+    else:
+        end = datetime(start.year, start.month + 1, 1)
+    return start, end
+
+
+def computed_performance_rows(depot_id=None, period_value=None):
+    bounds = month_bounds(period_value)
+    if bounds is None:
+        return None
+    start, end = bounds
+    vendor_query = Vendor.query.filter_by(active=True)
+    if depot_id:
+        vendor_query = vendor_query.filter_by(depot_id=depot_id)
+    vendors = vendor_query.order_by(Vendor.name).all()
+    phones = [vendor.phone for vendor in vendors]
+    aggregates = {}
+    if phones:
+        rows = (
+            db.session.query(
+                Sale.vendor_phone,
+                Sale.status,
+                func.count(Sale.id),
+                func.coalesce(func.sum(Sale.amount), 0),
+            )
+            .filter(
+                Sale.vendor_phone.in_(phones),
+                Sale.declared_at >= start,
+                Sale.declared_at < end,
+            )
+            .group_by(Sale.vendor_phone, Sale.status)
+            .all()
+        )
+        for phone, status, count, amount in rows:
+            aggregates.setdefault(phone, {})[status] = {
+                "count": int(count), "amount": int(amount or 0)
+            }
+
+    depot_totals = {}
+    depot_vendor_counts = {}
+    for vendor in vendors:
+        validated = aggregates.get(vendor.phone, {}).get("validee", {})
+        depot_totals[vendor.depot_id] = depot_totals.get(vendor.depot_id, 0) + validated.get("amount", 0)
+        depot_vendor_counts[vendor.depot_id] = depot_vendor_counts.get(vendor.depot_id, 0) + 1
+
+    result = []
+    for vendor in vendors:
+        stats = aggregates.get(vendor.phone, {})
+        validated = stats.get("validee", {"count": 0, "amount": 0})
+        rejected = stats.get("rejetee", {"count": 0, "amount": 0})
+        pending = stats.get("en_attente", {"count": 0, "amount": 0})
+        processed_count = validated["count"] + rejected["count"]
+        score = round(validated["count"] * 100 / processed_count) if processed_count else 0
+        average = round(depot_totals.get(vendor.depot_id, 0) / max(depot_vendor_counts.get(vendor.depot_id, 1), 1))
+        eligible = score >= 80 and validated["amount"] > average and validated["amount"] > 0
+        result.append({
+            "vendor": vendor_data(vendor),
+            "depot": {"id": vendor.depot.id, "name": vendor.depot.name},
+            "period": start.strftime("%Y-%m"),
+            "total_sales": validated["amount"],
+            "score": score,
+            "depot_average": average,
+            "validated_sales": validated["count"],
+            "rejected_sales": rejected["count"],
+            "pending_sales": pending["count"],
+            "eligible": eligible,
+            "suggested_bonus": round(validated["amount"] * 0.05) if eligible else 0,
+        })
+    return result
+
+
 def sale_data(sale):
     return {
         "id": sale.id,
@@ -263,8 +353,13 @@ def review_stock(stock_id):
 @api.get("/depositaire/performances")
 @role_required("depositaire")
 def depositaire_performances():
-    rows = Performance.query.filter_by(depot_id=current_user().depot_id).all()
-    return jsonify([performance_data(item) for item in rows])
+    rows = computed_performance_rows(
+        depot_id=current_user().depot_id,
+        period_value=request.args.get("period"),
+    )
+    if rows is None:
+        return jsonify({"error": "Periode invalide, format attendu AAAA-MM"}), 400
+    return jsonify(rows)
 
 
 @api.get("/depositaire/bonuses")
@@ -293,22 +388,61 @@ def depositaire_history():
 @api.get("/admin/summary")
 @role_required("administrateur")
 def admin_summary():
-    revenue = db.session.scalar(db.select(func.coalesce(func.sum(Sale.amount), 0)).where(Sale.status == "validee"))
+    bounds = month_bounds(request.args.get("period"))
+    if bounds is None:
+        return jsonify({"error": "Periode invalide, format attendu AAAA-MM"}), 400
+    start, end = bounds
+    depot_id = request.args.get("depot_id")
+    revenue_query = db.select(func.coalesce(func.sum(Sale.amount), 0)).where(
+        Sale.status == "validee", Sale.declared_at >= start, Sale.declared_at < end
+    )
+    vendors_query = Vendor.query.filter_by(active=True)
+    difficulties_query = Difficulty.query.filter(
+        Difficulty.state != "resolue", Difficulty.reported_at >= start, Difficulty.reported_at < end
+    )
+    bonuses_query = db.select(func.coalesce(func.sum(Bonus.amount), 0)).where(
+        Bonus.awarded_at >= start, Bonus.awarded_at < end
+    )
+    if depot_id:
+        revenue_query = revenue_query.where(Sale.depot_id == depot_id)
+        vendors_query = vendors_query.filter_by(depot_id=depot_id)
+        difficulties_query = difficulties_query.filter_by(depot_id=depot_id)
+        bonuses_query = bonuses_query.where(Bonus.depot_id == depot_id)
     return jsonify({
-        "active_vendors": Vendor.query.filter_by(active=True).count(),
-        "validated_revenue": revenue,
-        "open_difficulties": Difficulty.query.filter(Difficulty.state != "resolue").count(),
-        "awarded_bonuses": db.session.scalar(db.select(func.coalesce(func.sum(Bonus.amount), 0))),
+        "active_vendors": vendors_query.count(),
+        "validated_revenue": db.session.scalar(revenue_query),
+        "open_difficulties": difficulties_query.count(),
+        "awarded_bonuses": db.session.scalar(bonuses_query),
     })
 
 
 @api.get("/admin/users")
 @role_required("administrateur")
 def list_users():
+    return jsonify([user_data(item) for item in User.query.order_by(User.name).all()])
+
+
+@api.get("/admin/vendors")
+@role_required("administrateur")
+def list_vendors():
+    query = Vendor.query
+    if request.args.get("depot_id"):
+        query = query.filter_by(depot_id=request.args["depot_id"])
+    rows = query.order_by(Vendor.name).all()
+    phones = [item.phone for item in rows]
+    sale_counts = dict(
+        db.session.query(Sale.vendor_phone, func.count(Sale.id))
+        .filter(Sale.vendor_phone.in_(phones))
+        .group_by(Sale.vendor_phone)
+        .all()
+    ) if phones else {}
     return jsonify([{
-            "id": item.id, "name": item.name, "email": item.email, "phone": item.phone, "role": item.role, "active": item.active,
-        "depot": {"id": item.depot.id, "name": item.depot.name} if item.depot else None,
-    } for item in User.query.order_by(User.name).all()])
+        **vendor_data(item),
+        "depot": {"id": item.depot.id, "name": item.depot.name},
+        "last_declaration_at": iso(item.last_declaration_at),
+        "last_sales_amount": item.last_sales_amount,
+        "sales_count": sale_counts.get(item.phone, 0),
+    } for item in rows])
 
 
 @api.post("/admin/users")
@@ -343,6 +477,10 @@ def create_user():
         vendor = db.session.get(Vendor, user.phone)
         if vendor is None:
             db.session.add(Vendor(phone=user.phone, name=user.name, depot_id=depot_id))
+        else:
+            vendor.name = user.name
+            vendor.depot_id = depot_id
+            vendor.active = True
     try:
         db.session.commit()
     except IntegrityError:
@@ -356,28 +494,65 @@ def create_user():
 def update_user(user_id):
     user = db.session.get(User, user_id) or User.query.filter_by(id=user_id).first_or_404()
     payload = request.get_json(silent=True) or {}
-    for field in ("name", "email", "phone", "role", "depot_id", "active"):
-        if field in payload:
-            setattr(user, field, payload[field])
+    original_vendor = db.session.get(Vendor, user.phone) if user.role == "revendeur" and user.phone else None
+    role = payload.get("role", user.role)
+    name = str(payload.get("name", user.name)).strip()
+    email = str(payload.get("email", user.email)).strip().lower()
+    depot_id = payload.get("depot_id", user.depot_id)
+    phone = str(payload.get("phone", user.phone or "")).strip() or None
+    active = bool(payload.get("active", user.active))
+
+    if role not in {"administrateur", "depositaire", "revendeur"}:
+        return jsonify({"error": "Role invalide"}), 400
+    if not name or not email:
+        return jsonify({"error": "Le nom et l'adresse electronique sont obligatoires"}), 400
+    if role in {"depositaire", "revendeur"} and not depot_id:
+        return jsonify({"error": "Le depot est obligatoire pour ce role"}), 400
+    if role == "revendeur" and not phone:
+        return jsonify({"error": "Le telephone est obligatoire pour un revendeur"}), 400
+    if User.query.filter(func.lower(User.email) == email, User.id != user.id).first():
+        return jsonify({"error": "Cette adresse existe deja"}), 409
+    if phone and User.query.filter(User.phone == phone, User.id != user.id).first():
+        return jsonify({"error": "Ce numero de telephone existe deja"}), 409
+    if user.role == "revendeur" and user.phone and phone != user.phone:
+        return jsonify({"error": "Le numero WhatsApp d'un revendeur deja cree ne peut pas etre remplace"}), 400
+
+    user.name = name
+    user.email = email
+    user.role = role
+    user.depot_id = None if role == "administrateur" else depot_id
+    user.phone = phone if role == "revendeur" else None
+    user.active = active
     if payload.get("password"):
         user.set_password(payload["password"])
-    if user.role in {"depositaire", "revendeur"} and not user.depot_id:
-        return jsonify({"error": "Le depot est obligatoire pour ce role"}), 400
-    if user.role == "revendeur" and not user.phone:
-        return jsonify({"error": "Le telephone est obligatoire pour un revendeur"}), 400
-    db.session.commit()
-    return jsonify({"id": user.id, "active": user.active})
+    if user.role == "revendeur":
+        vendor = db.session.get(Vendor, user.phone)
+        if vendor is None:
+            vendor = Vendor(phone=user.phone)
+            db.session.add(vendor)
+        vendor.name = user.name
+        vendor.depot_id = user.depot_id
+        vendor.active = user.active
+    elif original_vendor is not None:
+        original_vendor.active = False
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "Cette adresse ou ce numero existe deja"}), 409
+    return jsonify(user_data(user))
 
 
 @api.get("/admin/performances")
 @role_required("administrateur")
 def admin_performances():
-    query = Performance.query
-    if request.args.get("depot_id"):
-        query = query.filter_by(depot_id=request.args["depot_id"])
-    if request.args.get("period"):
-        query = query.filter_by(period=request.args["period"])
-    return jsonify([performance_data(item) for item in query.all()])
+    rows = computed_performance_rows(
+        depot_id=request.args.get("depot_id"),
+        period_value=request.args.get("period"),
+    )
+    if rows is None:
+        return jsonify({"error": "Periode invalide, format attendu AAAA-MM"}), 400
+    return jsonify(rows)
 
 
 @api.route("/admin/bonuses", methods=["GET", "POST"])

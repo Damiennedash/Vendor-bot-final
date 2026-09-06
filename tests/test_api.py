@@ -1,4 +1,6 @@
 from app.extensions import db
+from datetime import datetime
+
 from app.models import Depot, Sale, User, Vendor
 
 
@@ -145,3 +147,133 @@ def test_admin_cannot_reuse_a_vendor_phone(client):
     response = client.post("/api/admin/users", headers=headers, json=payload)
     assert response.status_code == 409
     assert "telephone" in response.get_json()["error"]
+
+
+def test_admin_can_list_every_vendor_including_whatsapp_only_profiles(client):
+    with client.application.app_context():
+        _seed_accounts()
+    headers = _login(client, "admin@test.tg", "secret123")
+    response = client.get("/api/admin/vendors", headers=headers)
+    assert response.status_code == 200
+    rows = response.get_json()
+    assert {row["phone"] for row in rows} == {"22890000001", "22890000002"}
+    assert all("sales_count" in row for row in rows)
+
+
+def test_admin_can_edit_and_suspend_a_vendor_account(client):
+    with client.application.app_context():
+        _seed_accounts()
+        depot = Depot.query.filter_by(name="Depot A").one()
+        user = User(
+            name="Ancien nom",
+            email="vendeur-edit@test.tg",
+            phone="22897770000",
+            role="revendeur",
+            depot_id=depot.id,
+        )
+        user.set_password("secret123")
+        db.session.add_all([
+            user,
+            Vendor(phone=user.phone, name=user.name, depot_id=depot.id),
+        ])
+        db.session.commit()
+        user_id = user.id
+        depot_id = depot.id
+    headers = _login(client, "admin@test.tg", "secret123")
+    response = client.patch(
+        f"/api/admin/users/{user_id}",
+        headers=headers,
+        json={
+            "name": "Nouveau nom",
+            "email": "vendeur-nouveau@test.tg",
+            "role": "revendeur",
+            "depot_id": depot_id,
+            "phone": "22897770000",
+            "active": False,
+        },
+    )
+    assert response.status_code == 200
+    assert response.get_json()["active"] is False
+    with client.application.app_context():
+        vendor = db.session.get(Vendor, "22897770000")
+        assert vendor.name == "Nouveau nom"
+        assert vendor.active is False
+
+
+def test_performances_are_computed_from_sales_for_the_selected_month(client):
+    with client.application.app_context():
+        _seed_accounts()
+        vendor_a = db.session.get(Vendor, "22890000001")
+        vendor_b = db.session.get(Vendor, "22890000002")
+        Sale.query.delete()
+        db.session.add_all([
+            Sale(
+                vendor_phone=vendor_a.phone,
+                depot_id=vendor_a.depot_id,
+                period="Matin",
+                amount=10000,
+                status="validee",
+                declared_at=datetime(2026, 9, 2, 9, 0),
+            ),
+            Sale(
+                vendor_phone=vendor_a.phone,
+                depot_id=vendor_a.depot_id,
+                period="Matin",
+                amount=5000,
+                status="rejetee",
+                declared_at=datetime(2026, 9, 3, 9, 0),
+            ),
+            Sale(
+                vendor_phone=vendor_b.phone,
+                depot_id=vendor_b.depot_id,
+                period="Matin",
+                amount=99999,
+                status="validee",
+                declared_at=datetime(2026, 8, 3, 9, 0),
+            ),
+        ])
+        db.session.commit()
+    headers = _login(client, "admin@test.tg", "secret123")
+    response = client.get("/api/admin/performances?period=2026-09", headers=headers)
+    assert response.status_code == 200
+    rows = {row["vendor"]["phone"]: row for row in response.get_json()}
+    assert rows["22890000001"]["total_sales"] == 10000
+    assert rows["22890000001"]["validated_sales"] == 1
+    assert rows["22890000001"]["rejected_sales"] == 1
+    assert rows["22890000001"]["score"] == 50
+    assert rows["22890000002"]["total_sales"] == 0
+
+
+def test_depositaire_performances_are_computed_for_its_depot_only(client):
+    with client.application.app_context():
+        _seed_accounts()
+        own_vendor = db.session.get(Vendor, "22890000001")
+        other_vendor = db.session.get(Vendor, "22890000002")
+        Sale.query.delete()
+        db.session.add_all([
+            Sale(
+                vendor_phone=own_vendor.phone,
+                depot_id=own_vendor.depot_id,
+                period="Matin",
+                amount=25000,
+                status="validee",
+                declared_at=datetime(2026, 9, 2, 9, 0),
+            ),
+            Sale(
+                vendor_phone=other_vendor.phone,
+                depot_id=other_vendor.depot_id,
+                period="Matin",
+                amount=99000,
+                status="validee",
+                declared_at=datetime(2026, 9, 2, 9, 0),
+            ),
+        ])
+        db.session.commit()
+    headers = _login(client, "depot@test.tg", "secret123")
+    response = client.get(
+        "/api/depositaire/performances?period=2026-09", headers=headers
+    )
+    assert response.status_code == 200
+    rows = response.get_json()
+    assert [row["vendor"]["phone"] for row in rows] == ["22890000001"]
+    assert rows[0]["total_sales"] == 25000
