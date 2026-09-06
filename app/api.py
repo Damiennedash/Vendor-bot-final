@@ -226,8 +226,14 @@ def login():
 def forgot_password():
     payload = request.get_json(silent=True) or {}
     email = str(payload.get("email", "")).strip().lower()
-    user = User.query.filter(func.lower(User.email) == email, User.active.is_(True)).first()
     message = "Si ce compte existe, le lien de réinitialisation vient d'être envoyé. Vérifiez aussi vos spams."
+
+    if not os.getenv("RESEND_API_KEY", "").strip():
+        return jsonify({
+            "error": "L'envoi d'e-mail n'est pas encore configuré. Contactez l'administrateur FanMilk."
+        }), 503
+
+    user = User.query.filter(func.lower(User.email) == email, User.active.is_(True)).first()
 
     # La réponse reste volontairement identique pour ne pas révéler les comptes existants.
     if not user:
@@ -256,6 +262,9 @@ def forgot_password():
         logger.exception("Échec de l'envoi de récupération pour l'utilisateur %s", user.id)
         reset_token.used_at = utc_now()
         db.session.commit()
+        return jsonify({
+            "error": "L'e-mail n'a pas pu être envoyé. Réessayez dans quelques minutes."
+        }), 503
 
     return jsonify({"message": message})
 

@@ -76,6 +76,7 @@ def test_invalid_login_is_rejected(client):
 
 
 def test_password_reset_sends_one_time_link(client, monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "test-key")
     with client.application.app_context():
         _seed_accounts()
     sent = {}
@@ -106,6 +107,7 @@ def test_password_reset_sends_one_time_link(client, monkeypatch):
 
 
 def test_password_reset_keeps_unknown_email_private(client, monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "test-key")
     monkeypatch.setattr(
         "app.api.send_password_reset_email",
         lambda *args: pytest.fail("Aucun e-mail ne doit être envoyé"),
@@ -116,6 +118,15 @@ def test_password_reset_keeps_unknown_email_private(client, monkeypatch):
     assert response.status_code == 200
     with client.application.app_context():
         assert PasswordResetToken.query.count() == 0
+
+
+def test_password_reset_reports_missing_email_configuration(client, monkeypatch):
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    response = client.post(
+        "/api/auth/forgot-password", json={"email": "admin@test.tg"}
+    )
+    assert response.status_code == 503
+    assert "configuré" in response.get_json()["error"]
 
 
 def test_user_can_update_own_profile(client):
