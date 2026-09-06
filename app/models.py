@@ -40,6 +40,19 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
 
+class PasswordResetToken(db.Model):
+    __tablename__ = "password_reset_tokens"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    used_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
+    user = db.relationship("User")
+
+
 class Vendor(db.Model):
     __tablename__ = "vendors"
     phone = db.Column(db.String(32), primary_key=True)

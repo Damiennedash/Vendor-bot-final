@@ -1,5 +1,9 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import wraps
+import hashlib
+import logging
+import os
+import secrets
 
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import create_access_token, get_jwt, get_jwt_identity, jwt_required
@@ -7,10 +11,12 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from .extensions import db
-from .models import Bonus, Depot, Difficulty, Performance, Sale, Stock, User, Vendor, utc_now
+from .email_service import send_password_reset_email
+from .models import Bonus, Depot, Difficulty, PasswordResetToken, Performance, Sale, Stock, User, Vendor, utc_now
 
 
 api = Blueprint("api", __name__, url_prefix="/api")
+logger = logging.getLogger(__name__)
 
 
 def role_required(*roles):
@@ -218,8 +224,63 @@ def login():
 
 @api.post("/auth/forgot-password")
 def forgot_password():
-    # Reponse volontairement identique, que le compte existe ou non.
-    return jsonify({"message": "Si ce compte existe, les instructions de reinitialisation seront envoyees."})
+    payload = request.get_json(silent=True) or {}
+    email = str(payload.get("email", "")).strip().lower()
+    user = User.query.filter(func.lower(User.email) == email, User.active.is_(True)).first()
+    message = "Si ce compte existe, le lien de réinitialisation vient d'être envoyé. Vérifiez aussi vos spams."
+
+    # La réponse reste volontairement identique pour ne pas révéler les comptes existants.
+    if not user:
+        return jsonify({"message": message})
+
+    now = utc_now()
+    PasswordResetToken.query.filter_by(user_id=user.id, used_at=None).update(
+        {"used_at": now}
+    )
+    raw_token = secrets.token_urlsafe(32)
+    reset_token = PasswordResetToken(
+        user_id=user.id,
+        token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
+        expires_at=now + timedelta(minutes=30),
+    )
+    db.session.add(reset_token)
+    db.session.commit()
+
+    frontend_url = os.getenv(
+        "FRONTEND_URL", "https://fanmilk-togo.damiennedash.workers.dev"
+    ).rstrip("/")
+    reset_url = "{}/reinitialisation?token={}".format(frontend_url, raw_token)
+    try:
+        send_password_reset_email(user.email, user.name, reset_url)
+    except Exception:
+        logger.exception("Échec de l'envoi de récupération pour l'utilisateur %s", user.id)
+        reset_token.used_at = utc_now()
+        db.session.commit()
+
+    return jsonify({"message": message})
+
+
+@api.post("/auth/reset-password")
+def reset_password():
+    payload = request.get_json(silent=True) or {}
+    raw_token = str(payload.get("token", "")).strip()
+    password = str(payload.get("password", ""))
+    if len(password) < 8:
+        return jsonify({"error": "Le mot de passe doit contenir au moins 8 caractères"}), 400
+    if not raw_token:
+        return jsonify({"error": "Lien de réinitialisation invalide ou expiré"}), 400
+
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    reset_token = PasswordResetToken.query.filter_by(
+        token_hash=token_hash, used_at=None
+    ).first()
+    if not reset_token or reset_token.expires_at < utc_now() or not reset_token.user.active:
+        return jsonify({"error": "Lien de réinitialisation invalide ou expiré"}), 400
+
+    reset_token.user.set_password(password)
+    reset_token.used_at = utc_now()
+    db.session.commit()
+    return jsonify({"message": "Mot de passe modifié. Vous pouvez maintenant vous connecter."})
 
 
 @api.get("/me")

@@ -18,6 +18,12 @@ services:
         generateValue: true
       - key: CORS_ORIGINS
         value: https://fanmilk-togo-dashboard.djatadamienne5.chatgpt.site,http://localhost:3000
+      - key: FRONTEND_URL
+        value: https://fanmilk-togo.damiennedash.workers.dev
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESET_EMAIL_FROM
+        value: FanMilk Togo <onboarding@resend.dev>
       - key: ADMIN_EMAIL
         sync: false
       - key: ADMIN_PASSWORD

@@ -56,7 +56,12 @@ Les identifiants locaux sont dans `.env` (`ADMIN_EMAIL`, `ADMIN_PASSWORD`,
 
 - `POST /api/auth/login`
 - `POST /api/auth/forgot-password`
+- `POST /api/auth/reset-password`
 - `GET /api/me`
+
+La récupération de mot de passe utilise Resend. En production, renseignez
+`RESEND_API_KEY`, `RESET_EMAIL_FROM` et `FRONTEND_URL`. Le lien envoyé est
+valable 30 minutes et ne peut être utilisé qu'une fois.
 
 ### Depositaire
 

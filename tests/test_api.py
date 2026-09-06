@@ -1,7 +1,7 @@
 from app.extensions import db
 from datetime import datetime
 
-from app.models import Depot, Sale, User, Vendor
+from app.models import Depot, PasswordResetToken, Sale, User, Vendor
 
 
 def _login(client, email, password):
@@ -73,6 +73,49 @@ def test_admin_cannot_validate_a_sale(client):
 def test_invalid_login_is_rejected(client):
     response = client.post("/api/auth/login", json={"email": "none@test.tg", "password": "bad"})
     assert response.status_code == 401
+
+
+def test_password_reset_sends_one_time_link(client, monkeypatch):
+    with client.application.app_context():
+        _seed_accounts()
+    sent = {}
+
+    def capture_email(recipient, recipient_name, reset_url):
+        sent.update(recipient=recipient, name=recipient_name, url=reset_url)
+
+    monkeypatch.setattr("app.api.send_password_reset_email", capture_email)
+    response = client.post(
+        "/api/auth/forgot-password", json={"email": "admin@test.tg"}
+    )
+    assert response.status_code == 200
+    assert sent["recipient"] == "admin@test.tg"
+    raw_token = sent["url"].split("token=", 1)[1]
+
+    response = client.post(
+        "/api/auth/reset-password",
+        json={"token": raw_token, "password": "nouveau-secret"},
+    )
+    assert response.status_code == 200
+    assert _login(client, "admin@test.tg", "nouveau-secret")
+
+    reused = client.post(
+        "/api/auth/reset-password",
+        json={"token": raw_token, "password": "encore-secret"},
+    )
+    assert reused.status_code == 400
+
+
+def test_password_reset_keeps_unknown_email_private(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.api.send_password_reset_email",
+        lambda *args: pytest.fail("Aucun e-mail ne doit être envoyé"),
+    )
+    response = client.post(
+        "/api/auth/forgot-password", json={"email": "absent@test.tg"}
+    )
+    assert response.status_code == 200
+    with client.application.app_context():
+        assert PasswordResetToken.query.count() == 0
 
 
 def test_user_can_update_own_profile(client):
