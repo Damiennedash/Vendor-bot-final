@@ -54,6 +54,7 @@ allowed_origins = {
     "http://localhost:3000",
     "https://fanmilk.onrender.com",
     "https://fanmilk-togo.damiennedash.workers.dev",
+    "https://fanmilk-togo-dashboard.djatadamienne5.chatgpt.site",
 }
 allowed_origins.update({
     item.strip()
@@ -101,6 +102,17 @@ def init_db_command():
     if "mfa_enabled" not in user_columns:
         db.session.execute(text("ALTER TABLE users ADD COLUMN mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
     db.session.commit()
+    notification_columns = {column["name"] for column in inspect(db.engine).get_columns("notifications")}
+    for name, definition in (
+        ("email_status", "VARCHAR(16) NOT NULL DEFAULT 'en_attente'"),
+        ("whatsapp_status", "VARCHAR(16) NOT NULL DEFAULT 'en_attente'"),
+        ("delivery_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_delivery_error", "TEXT"),
+        ("last_attempt_at", "TIMESTAMP"),
+    ):
+        if name not in notification_columns:
+            db.session.execute(text("ALTER TABLE notifications ADD COLUMN {} {}".format(name, definition)))
+    db.session.commit()
     columns = {column["name"] for column in inspect(db.engine).get_columns("bonuses")}
     if "sale_id" not in columns:
         db.session.execute(text(
@@ -137,6 +149,13 @@ def init_db_command():
     db.session.execute(text(
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_bonuses_sale_id ON bonuses (sale_id)"
     ))
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_sales_scope_date ON sales (depot_id, status, declared_at)",
+        "CREATE INDEX IF NOT EXISTS ix_stocks_scope_date ON stocks (depot_id, status, declared_at)",
+        "CREATE INDEX IF NOT EXISTS ix_difficulties_scope_date ON difficulties (depot_id, state, reported_at)",
+        "CREATE INDEX IF NOT EXISTS ix_notifications_inbox ON notifications (recipient_user_id, read_at, created_at)",
+    ):
+        db.session.execute(text(statement))
     db.session.commit()
     depot_names = ["GERM DOSSEH", "SUPER DEPOT", "NBUKE RAMCO", "NADONIELLA A", "SAINT MARTIN", "YEHONAM"]
     for name in depot_names:

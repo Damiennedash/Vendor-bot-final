@@ -117,10 +117,7 @@ def _question_vente():
 
 
 def _menu_probleme():
-    if _matin():
-        intro = "Avez-vous un probleme pour atteindre vos objectifs *aujourd hui* ?"
-    else:
-        intro = "Avez-vous rencontre un probleme *au cours de la journee* ?"
+    intro = "Avez-vous un probleme pour atteindre vos objectifs *aujourd hui* ?"
     lines = [
         intro, "",
         "1 - J ai un probleme produit",

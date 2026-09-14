@@ -55,6 +55,18 @@ class PasswordResetToken(db.Model):
     user = db.relationship("User")
 
 
+class MfaRecoveryCode(db.Model):
+    __tablename__ = "mfa_recovery_codes"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    code_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    used_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
+    user = db.relationship("User")
+
+
 class Vendor(db.Model):
     __tablename__ = "vendors"
     phone = db.Column(db.String(32), primary_key=True)
@@ -201,5 +213,40 @@ class Notification(db.Model):
     priority = db.Column(db.String(16), nullable=False, default="normale")
     link = db.Column(db.String(255), nullable=False, default="")
     read_at = db.Column(db.DateTime)
+    email_status = db.Column(db.String(16), nullable=False, default="en_attente")
+    whatsapp_status = db.Column(db.String(16), nullable=False, default="en_attente")
+    delivery_attempts = db.Column(db.Integer, nullable=False, default=0)
+    last_delivery_error = db.Column(db.Text)
+    last_attempt_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, nullable=False, default=utc_now, index=True)
     recipient = db.relationship("User")
+
+
+class ProductTarget(db.Model):
+    __tablename__ = "product_targets"
+    __table_args__ = (
+        db.UniqueConstraint("product_id", "depot_id", "period", name="uq_product_target_scope"),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("products.id"), nullable=False, index=True)
+    depot_id = db.Column(db.Integer, db.ForeignKey("depots.id"), index=True)
+    period = db.Column(db.String(7), nullable=False, index=True)
+    quantity_target = db.Column(db.Integer, nullable=False, default=0)
+    updated_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utc_now, onupdate=utc_now)
+    product = db.relationship("Product")
+    depot = db.relationship("Depot")
+
+
+class AuditLog(db.Model):
+    __tablename__ = "audit_logs"
+    id = db.Column(db.Integer, primary_key=True)
+    actor_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), index=True)
+    action = db.Column(db.String(64), nullable=False, index=True)
+    entity_type = db.Column(db.String(64), nullable=False, index=True)
+    entity_id = db.Column(db.String(64), nullable=False, default="")
+    description = db.Column(db.String(255), nullable=False)
+    before_data = db.Column(db.JSON)
+    after_data = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now, index=True)
+    actor = db.relationship("User")

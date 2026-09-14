@@ -16,7 +16,9 @@ from sqlalchemy.exc import IntegrityError
 
 from .extensions import db
 from .email_service import send_password_reset_email
-from .models import Bonus, Depot, Difficulty, Notification, PasswordResetToken, Performance, Product, Sale, SaleLine, Stock, User, Vendor, utc_now
+from .audit import record_audit
+from .models import AuditLog, Bonus, Depot, Difficulty, MfaRecoveryCode, Notification, PasswordResetToken, Performance, Product, ProductTarget, Sale, SaleLine, Stock, User, Vendor, utc_now
+from .notifications import retry_notification
 
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -120,6 +122,25 @@ def mfa_setup_payload(user):
         "manual_key": user.mfa_secret,
         "provisioning_uri": uri,
         "qr_code": "data:image/png;base64," + base64.b64encode(stream.getvalue()).decode("ascii"),
+    }
+
+
+def notification_data(item):
+    return {
+        "id": item.id,
+        "recipient": user_data(item.recipient),
+        "kind": item.kind,
+        "title": item.title,
+        "message": item.message,
+        "priority": item.priority,
+        "link": item.link,
+        "read": item.read_at is not None,
+        "email_status": item.email_status,
+        "whatsapp_status": item.whatsapp_status,
+        "delivery_attempts": item.delivery_attempts,
+        "last_delivery_error": item.last_delivery_error,
+        "last_attempt_at": iso(item.last_attempt_at),
+        "created_at": iso(item.created_at),
     }
 
 
@@ -379,11 +400,35 @@ def verify_mfa():
     code = str((request.get_json(silent=True) or {}).get("code", "")).replace(" ", "")
     if not user or not user.active or not user.mfa_secret:
         return jsonify({"error": "Compte indisponible"}), 401
-    if not pyotp.TOTP(user.mfa_secret).verify(code, valid_window=1):
-        return jsonify({"error": "Code Google Authenticator invalide"}), 401
+    first_setup = not user.mfa_enabled
+    valid_totp = pyotp.TOTP(user.mfa_secret).verify(code, valid_window=1)
+    recovery = None
+    if not valid_totp and user.mfa_enabled:
+        recovery = MfaRecoveryCode.query.filter_by(
+            user_id=user.id,
+            code_hash=hashlib.sha256(code.upper().encode("utf-8")).hexdigest(),
+            used_at=None,
+        ).first()
+    if not valid_totp and not recovery:
+        return jsonify({"error": "Code Google Authenticator ou code de secours invalide"}), 401
+    if recovery:
+        recovery.used_at = utc_now()
+    recovery_codes = []
+    if first_setup:
+        MfaRecoveryCode.query.filter_by(user_id=user.id).delete()
+        recovery_codes = [secrets.token_hex(4).upper() for _ in range(8)]
+        for raw_code in recovery_codes:
+            db.session.add(MfaRecoveryCode(
+                user_id=user.id,
+                code_hash=hashlib.sha256(raw_code.encode("utf-8")).hexdigest(),
+            ))
     user.mfa_enabled = True
     db.session.commit()
-    return jsonify({"access_token": authenticated_token(user), "user": user_data(user)})
+    return jsonify({
+        "access_token": authenticated_token(user),
+        "user": user_data(user),
+        **({"recovery_codes": recovery_codes} if recovery_codes else {}),
+    })
 
 
 @api.post("/auth/forgot-password")
@@ -417,7 +462,7 @@ def forgot_password():
     db.session.commit()
 
     frontend_url = os.getenv(
-        "FRONTEND_URL", "https://fanmilk-togo.damiennedash.workers.dev"
+        "FRONTEND_URL", "https://fanmilk-togo-dashboard.djatadamienne5.chatgpt.site"
     ).rstrip("/")
     reset_url = "{}/reinitialisation?token={}".format(frontend_url, raw_token)
     try:
@@ -516,16 +561,7 @@ def list_notifications():
     rows = Notification.query.filter_by(recipient_user_id=current_user().id).order_by(
         Notification.created_at.desc()
     ).limit(50).all()
-    return jsonify([{
-        "id": item.id,
-        "kind": item.kind,
-        "title": item.title,
-        "message": item.message,
-        "priority": item.priority,
-        "link": item.link,
-        "read": item.read_at is not None,
-        "created_at": iso(item.created_at),
-    } for item in rows])
+    return jsonify([notification_data(item) for item in rows])
 
 
 @api.patch("/notifications/<int:item_id>")
@@ -580,10 +616,14 @@ def review_sale(sale_id):
         return jsonify({"error": "Action invalide"}), 400
     if action == "reject" and not reason:
         return jsonify({"error": "Le motif de rejet est obligatoire"}), 400
+    before = {"status": sale.status, "rejection_reason": sale.rejection_reason}
     sale.status = "validee" if action == "validate" else "rejetee"
     sale.rejection_reason = reason or None
     sale.reviewed_at = utc_now()
     sale.reviewed_by = user.id
+    record_audit(user, "validation" if action == "validate" else "rejet", "vente", sale.id,
+                 "Vente {} par {}".format(sale.id, sale.vendor.name), before,
+                 {"status": sale.status, "rejection_reason": sale.rejection_reason})
     db.session.commit()
     message = "Votre vente a ete validee." if action == "validate" else "Votre vente a ete rejetee. Motif : " + reason
     from .whatsapp import send_message
@@ -639,10 +679,14 @@ def review_stock(stock_id):
         return jsonify({"error": "Action invalide"}), 400
     if action == "reject" and not reason:
         return jsonify({"error": "Le motif de rejet est obligatoire"}), 400
+    before = {"status": stock.status, "rejection_reason": stock.rejection_reason}
     stock.status = "valide" if action == "validate" else "rejete"
     stock.rejection_reason = reason or None
     stock.reviewed_at = utc_now()
     stock.reviewed_by = user.id
+    record_audit(user, "validation" if action == "validate" else "rejet", "stock", stock.id,
+                 "Stock {} de {}".format(stock.id, stock.vendor.name), before,
+                 {"status": stock.status, "rejection_reason": stock.rejection_reason})
     db.session.commit()
     message = "Votre stock a ete valide." if action == "validate" else "Votre stock a ete rejete. Motif : " + reason
     from .whatsapp import send_message
@@ -786,6 +830,9 @@ def create_user():
     )
     user.set_password(payload["password"])
     db.session.add(user)
+    db.session.flush()
+    record_audit(current_user(), "creation", "utilisateur", user.id,
+                 "Création du compte {}".format(user.name), None, user_data(user))
     if role == "revendeur":
         vendor = db.session.get(Vendor, user.phone)
         if vendor is None:
@@ -830,6 +877,7 @@ def update_user(user_id):
     if user.role == "revendeur" and user.phone and phone != user.phone:
         return jsonify({"error": "Le numero WhatsApp d'un revendeur deja cree ne peut pas etre remplace"}), 400
 
+    before = user_data(user)
     user.name = name
     user.email = email
     user.role = role
@@ -848,6 +896,9 @@ def update_user(user_id):
         vendor.active = user.active
     elif original_vendor is not None:
         original_vendor.active = False
+    record_audit(current_user(), "suspension" if before["active"] and not active else "modification",
+                 "utilisateur", user.id, "Mise à jour du compte {}".format(user.name),
+                 before, user_data(user))
     try:
         db.session.commit()
     except IntegrityError:
@@ -931,6 +982,10 @@ def admin_bonuses():
         sale_id=sale.id,
     )
     db.session.add(item)
+    db.session.flush()
+    record_audit(current_user(), "attribution", "prime", item.id,
+                 "Prime de 500 FCFA attribuée à {} pour la vente {}".format(sale.vendor.name, sale.id),
+                 None, {"sale_id": sale.id, "amount": 500, "vendor": sale.vendor.name})
     db.session.commit()
     from .notifications import notify_users, recipients_for_depot
     notify_users(
@@ -968,7 +1023,10 @@ def update_difficulty(item_id):
     allowed = {"ouverte": "en_cours", "en_cours": "resolue"}
     if allowed.get(item.state) != state:
         return jsonify({"error": "Transition d'etat invalide"}), 400
+    before = {"state": item.state}
     item.state = state
+    record_audit(current_user(), "changement_statut", "difficulte", item.id,
+                 "Difficulté {} passée à {}".format(item.id, state), before, {"state": state})
     db.session.commit()
     return jsonify(difficulty_data(item))
 
@@ -1007,3 +1065,180 @@ def admin_stocks():
 @role_required("administrateur")
 def list_depots():
     return jsonify([{"id": item.id, "name": item.name, "location": item.location} for item in Depot.query.order_by(Depot.name).all()])
+
+
+@api.post("/admin/users/<int:user_id>/reset-mfa")
+@role_required("administrateur")
+def reset_user_mfa(user_id):
+    actor = current_user()
+    user = db.session.get(User, user_id) or User.query.filter_by(id=user_id).first_or_404()
+    before = {"mfa_enabled": user.mfa_enabled}
+    user.mfa_secret = None
+    user.mfa_enabled = False
+    MfaRecoveryCode.query.filter_by(user_id=user.id).delete()
+    record_audit(actor, "reinitialisation_mfa", "utilisateur", user.id,
+                 "Réinitialisation MFA du compte {}".format(user.name), before,
+                 {"mfa_enabled": False})
+    db.session.commit()
+    return jsonify({"message": "La double authentification sera reconfigurée à la prochaine connexion."})
+
+
+@api.get("/admin/system-status")
+@role_required("administrateur")
+def system_status():
+    return jsonify({
+        "email_configured": bool(os.getenv("RESEND_API_KEY", "").strip()),
+        "whatsapp_configured": bool(os.getenv("WHATSAPP_TOKEN", "").strip()),
+        "frontend_url": os.getenv("FRONTEND_URL", "").strip(),
+        "database": "connectee",
+    })
+
+
+@api.get("/admin/notifications")
+@role_required("administrateur")
+def admin_notifications():
+    limit = min(max(request.args.get("limit", 100, type=int), 1), 500)
+    rows = Notification.query.order_by(Notification.created_at.desc()).limit(limit).all()
+    return jsonify([notification_data(item) for item in rows])
+
+
+@api.post("/admin/notifications/<int:item_id>/retry")
+@role_required("administrateur")
+def retry_admin_notification(item_id):
+    item = db.session.get(Notification, item_id) or Notification.query.filter_by(id=item_id).first_or_404()
+    retry_notification(item.id)
+    item = db.session.get(Notification, item.id)
+    record_audit(current_user(), "nouvelle_tentative", "notification", item.id,
+                 "Nouvelle tentative de livraison de la notification {}".format(item.id),
+                 None, {"email_status": item.email_status, "whatsapp_status": item.whatsapp_status})
+    db.session.commit()
+    return jsonify(notification_data(item))
+
+
+@api.get("/admin/audit")
+@role_required("administrateur")
+def admin_audit():
+    query = apply_date_filters(AuditLog.query, AuditLog.created_at)
+    if query is None:
+        return jsonify({"error": "Dates invalides"}), 400
+    rows = query.order_by(AuditLog.created_at.desc()).limit(500).all()
+    return jsonify([{
+        "id": item.id,
+        "actor": user_data(item.actor) if item.actor else None,
+        "action": item.action,
+        "entity_type": item.entity_type,
+        "entity_id": item.entity_id,
+        "description": item.description,
+        "before": item.before_data,
+        "after": item.after_data,
+        "created_at": iso(item.created_at),
+    } for item in rows])
+
+
+def _target_rows(period, depot_id):
+    bounds = month_bounds(period)
+    if bounds is None:
+        return None
+    start, end = bounds
+    actual_query = (
+        db.session.query(SaleLine.product_id, func.coalesce(func.sum(SaleLine.quantity), 0))
+        .join(Sale, Sale.id == SaleLine.sale_id)
+        .filter(Sale.status == "validee", Sale.declared_at >= start, Sale.declared_at < end)
+    )
+    if depot_id:
+        actual_query = actual_query.filter(Sale.depot_id == depot_id)
+    actual = {product_id: int(quantity or 0) for product_id, quantity in actual_query.group_by(SaleLine.product_id).all()}
+    targets_query = ProductTarget.query.filter_by(period=period)
+    targets_query = targets_query.filter(ProductTarget.depot_id == depot_id) if depot_id else targets_query.filter(ProductTarget.depot_id.is_(None))
+    targets = {item.product_id: item for item in targets_query.all()}
+    return [{
+        "id": targets.get(product.id).id if targets.get(product.id) else None,
+        "product": {"id": product.id, "sku": product.sku, "name": product.name},
+        "depot_id": depot_id,
+        "period": period,
+        "quantity_target": targets.get(product.id).quantity_target if targets.get(product.id) else 0,
+        "actual_quantity": actual.get(product.id, 0),
+        "completion_rate": round(actual.get(product.id, 0) * 100 / targets.get(product.id).quantity_target, 1) if targets.get(product.id) and targets.get(product.id).quantity_target else 0,
+    } for product in Product.query.filter_by(active=True).order_by(Product.name).all()]
+
+
+@api.route("/admin/targets", methods=["GET", "PUT"])
+@role_required("administrateur")
+def admin_targets():
+    if request.method == "GET":
+        period = request.args.get("period") or date.today().strftime("%Y-%m")
+        depot_id = requested_depot_id()
+        if depot_id == -1:
+            return jsonify({"error": "Dépôt invalide"}), 400
+        rows = _target_rows(period, depot_id)
+        return jsonify(rows) if rows is not None else (jsonify({"error": "Période invalide"}), 400)
+    payload = request.get_json(silent=True) or {}
+    period = str(payload.get("period", ""))
+    depot_id = payload.get("depot_id") or None
+    product = db.session.get(Product, payload.get("product_id"))
+    if month_bounds(period) is None or not product:
+        return jsonify({"error": "Produit ou période invalide"}), 400
+    try:
+        quantity = int(payload.get("quantity_target", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Objectif invalide"}), 400
+    if quantity < 0:
+        return jsonify({"error": "L'objectif ne peut pas être négatif"}), 400
+    query = ProductTarget.query.filter_by(product_id=product.id, period=period)
+    query = query.filter(ProductTarget.depot_id == depot_id) if depot_id else query.filter(ProductTarget.depot_id.is_(None))
+    item = query.first()
+    before = {"quantity_target": item.quantity_target} if item else None
+    if not item:
+        item = ProductTarget(product_id=product.id, depot_id=depot_id, period=period,
+                             updated_by=current_user().id)
+        db.session.add(item)
+    item.quantity_target = quantity
+    item.updated_by = current_user().id
+    db.session.flush()
+    record_audit(current_user(), "objectif_produit", "objectif", item.id,
+                 "Objectif {} fixé à {} unités".format(product.name, quantity), before,
+                 {"quantity_target": quantity, "period": period, "depot_id": depot_id})
+    db.session.commit()
+    return jsonify(_target_rows(period, depot_id))
+
+
+@api.get("/admin/analytics")
+@role_required("administrateur")
+def admin_analytics():
+    period = request.args.get("period") or date.today().strftime("%Y-%m")
+    bounds = month_bounds(period)
+    depot_id = requested_depot_id()
+    if bounds is None or depot_id == -1:
+        return jsonify({"error": "Période ou dépôt invalide"}), 400
+    start, end = bounds
+    previous_end = start
+    previous_start = datetime(start.year - 1, 12, 1) if start.month == 1 else datetime(start.year, start.month - 1, 1)
+
+    def scoped_sales(start_at, end_at):
+        query = Sale.query.filter(Sale.status == "validee", Sale.declared_at >= start_at, Sale.declared_at < end_at)
+        return query.filter(Sale.depot_id == depot_id) if depot_id else query
+
+    current_query = scoped_sales(start, end)
+    previous_query = scoped_sales(previous_start, previous_end)
+    current_revenue = int(db.session.scalar(db.select(func.coalesce(func.sum(Sale.amount), 0)).where(Sale.id.in_(current_query.with_entities(Sale.id)))) or 0)
+    previous_revenue = int(db.session.scalar(db.select(func.coalesce(func.sum(Sale.amount), 0)).where(Sale.id.in_(previous_query.with_entities(Sale.id)))) or 0)
+    daily_rows = current_query.with_entities(func.date(Sale.declared_at), func.sum(Sale.amount), func.count(Sale.id)).group_by(func.date(Sale.declared_at)).order_by(func.date(Sale.declared_at)).all()
+    vendor_query = current_query.join(Vendor, Vendor.phone == Sale.vendor_phone).join(Depot, Depot.id == Sale.depot_id).with_entities(
+        Vendor.phone, Vendor.name, Depot.name, func.sum(Sale.amount), func.count(Sale.id)
+    ).group_by(Vendor.phone, Vendor.name, Depot.name).order_by(func.sum(Sale.amount).desc())
+    depot_query = current_query.join(Depot, Depot.id == Sale.depot_id).with_entities(
+        Depot.id, Depot.name, func.sum(Sale.amount), func.count(Sale.id)
+    ).group_by(Depot.id, Depot.name).order_by(func.sum(Sale.amount).desc())
+    delta = round((current_revenue - previous_revenue) * 100 / previous_revenue, 1) if previous_revenue else (100 if current_revenue else 0)
+    return jsonify({
+        "period": period,
+        "current_revenue": current_revenue,
+        "previous_revenue": previous_revenue,
+        "change_percent": delta,
+        "validated_sales": current_query.count(),
+        "pending_sales": (Sale.query.filter_by(status="en_attente", **({"depot_id": depot_id} if depot_id else {})).count()),
+        "daily": [{"date": str(day), "amount": int(amount or 0), "sales": int(count)} for day, amount, count in daily_rows],
+        "vendor_ranking": [{"phone": phone, "name": name, "depot": depot, "amount": int(amount or 0), "sales": int(count)} for phone, name, depot, amount, count in vendor_query.limit(50).all()],
+        "depot_ranking": [{"id": row_id, "name": name, "amount": int(amount or 0), "sales": int(count)} for row_id, name, amount, count in depot_query.all()],
+        "product_targets": _target_rows(period, depot_id),
+    })

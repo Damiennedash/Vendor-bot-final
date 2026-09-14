@@ -19,7 +19,7 @@ services:
       - key: CORS_ORIGINS
         value: https://fanmilk-togo-dashboard.djatadamienne5.chatgpt.site,http://localhost:3000
       - key: FRONTEND_URL
-        value: https://fanmilk-togo.damiennedash.workers.dev
+        value: https://fanmilk-togo-dashboard.djatadamienne5.chatgpt.site
       - key: RESEND_API_KEY
         sync: false
       - key: RESET_EMAIL_FROM

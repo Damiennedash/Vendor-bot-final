@@ -2,7 +2,7 @@ from app.extensions import db
 from datetime import datetime
 import pyotp
 
-from app.models import Depot, PasswordResetToken, Product, Sale, SaleLine, User, Vendor
+from app.models import AuditLog, Depot, MfaRecoveryCode, PasswordResetToken, Product, ProductTarget, Sale, SaleLine, User, Vendor
 
 
 def _login(client, email, password):
@@ -102,6 +102,53 @@ def test_login_requires_google_authenticator_code(client):
         json={"code": "000000"},
     )
     assert refused.status_code == 401
+
+
+def test_mfa_setup_returns_one_time_recovery_codes(client):
+    with client.application.app_context():
+        _seed_accounts()
+    response = client.post(
+        "/api/auth/login", json={"email": "admin@test.tg", "password": "secret123"}
+    ).get_json()
+    with client.application.app_context():
+        secret = User.query.filter_by(email="admin@test.tg").one().mfa_secret
+    verified = client.post(
+        "/api/auth/mfa/verify",
+        headers={"Authorization": "Bearer " + response["mfa_token"]},
+        json={"code": pyotp.TOTP(secret).now()},
+    )
+    assert verified.status_code == 200
+    assert len(verified.get_json()["recovery_codes"]) == 8
+    with client.application.app_context():
+        assert MfaRecoveryCode.query.count() == 8
+
+
+def test_admin_analytics_targets_and_audit(client):
+    with client.application.app_context():
+        sale_id, _ = _seed_accounts()
+        sale = db.session.get(Sale, sale_id)
+        sale.status = "validee"
+        sale.amount = 25000
+        sale.declared_at = datetime(2026, 9, 8, 12, 0)
+        product = Product(sku="FANXTRA", name="FanXtra")
+        db.session.add(product)
+        db.session.flush()
+        product_id = product.id
+        db.session.add(SaleLine(sale_id=sale.id, product_id=product.id, quantity=4, subtotal=25000))
+        depot_id = sale.depot_id
+        db.session.commit()
+    headers = _login(client, "admin@test.tg", "secret123")
+    response = client.get("/api/admin/analytics?period=2026-09&depot_id={}".format(depot_id), headers=headers)
+    assert response.status_code == 200
+    assert response.get_json()["current_revenue"] == 25000
+    target = client.put("/api/admin/targets", headers=headers, json={
+        "product_id": product_id, "depot_id": depot_id, "period": "2026-09", "quantity_target": 10,
+    })
+    assert target.status_code == 200
+    assert target.get_json()[0]["actual_quantity"] == 4
+    with client.application.app_context():
+        assert ProductTarget.query.count() == 1
+        assert AuditLog.query.filter_by(action="objectif_produit").count() == 1
 
 
 def test_password_reset_sends_one_time_link(client, monkeypatch):
