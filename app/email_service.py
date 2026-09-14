@@ -8,6 +8,31 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+def send_notification_email(recipient, subject, title, message):
+    """Envoie une notification métier via Resend."""
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    if not api_key:
+        logger.warning("Notification e-mail ignorée : RESEND_API_KEY manquante")
+        return False
+    sender = os.getenv(
+        "NOTIFICATION_EMAIL_FROM",
+        os.getenv("RESET_EMAIL_FROM", "FanMilk Togo <onboarding@resend.dev>"),
+    ).strip()
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": "Bearer {}".format(api_key), "Content-Type": "application/json"},
+        json={
+            "from": sender,
+            "to": [recipient],
+            "subject": subject,
+            "html": "<h2>{}</h2><p>{}</p>".format(escape(title), escape(message).replace("\n", "<br>")),
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    return True
+
+
 def send_password_reset_email(recipient, recipient_name, reset_url):
     """Envoie le lien de récupération via l'API HTTP Resend."""
     api_key = os.getenv("RESEND_API_KEY", "").strip()

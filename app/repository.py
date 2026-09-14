@@ -123,6 +123,7 @@ def append_declaration(row):
     sale = Sale.query.filter(
         Sale.vendor_phone == vendor.phone,
         Sale.status == "en_attente",
+        Sale.source == "WhatsApp - saisie en cours",
         Sale.declared_at >= day_start,
         Sale.declared_at < day_end,
     ).order_by(Sale.id.desc()).first()
@@ -157,16 +158,49 @@ def append_declaration(row):
         Difficulty.reported_at < day_end,
         Difficulty.category == category,
     ).first()
+    difficulty = None
     if category and category not in {"-", "Aucun probleme"} and not difficulty_exists:
-        db.session.add(Difficulty(
+        difficulty = Difficulty(
             vendor_phone=vendor.phone,
             depot_id=depot.id,
             category=category,
             prime_pillar=row[13] or "",
             description=row[14] or "",
             reported_at=declared_at,
-        ))
+        )
+        db.session.add(difficulty)
     db.session.commit()
+    if (row[15] or "") != "WhatsApp - saisie en cours":
+        from .notifications import notify_users, recipients_for_depot
+        details = ", ".join(
+            "{} : {}".format(sku, quantity) for sku, quantity in quantities.items() if quantity > 0
+        ) or "Aucun produit déclaré"
+        recipients = recipients_for_depot(depot.id)
+        sale_message = "{} ({}) a soumis une vente de {:,} FCFA le {}. Produits : {}.".format(
+            vendor.name, vendor.phone, amount, declared_at.strftime("%d/%m/%Y à %H:%M"), details
+        ).replace(",", " ")
+        notify_users(
+            [user for user in recipients if user.role == "depositaire"],
+            "vente", "Nouvelle vente Vendor-Bot", sale_message, "/depositaire/ventes",
+        )
+        notify_users(
+            [user for user in recipients if user.role == "administrateur"],
+            "vente", "Nouvelle vente Vendor-Bot", sale_message, "/dashboard/donnees",
+        )
+        if difficulty:
+            difficulty_message = "{} — {} : {}".format(
+                vendor.name, category, difficulty.description or "Aucun détail"
+            )
+            notify_users(
+                [user for user in recipients if user.role == "depositaire"],
+                "difficulte", "Difficulté urgente signalée", difficulty_message,
+                "/depositaire/difficultes", priority="urgente",
+            )
+            notify_users(
+                [user for user in recipients if user.role == "administrateur"],
+                "difficulte", "Difficulté urgente signalée", difficulty_message,
+                "/dashboard/difficultes", priority="urgente",
+            )
     return sale.id
 
 

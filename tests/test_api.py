@@ -1,13 +1,23 @@
 from app.extensions import db
 from datetime import datetime
+import pyotp
 
-from app.models import Depot, PasswordResetToken, Sale, User, Vendor
+from app.models import Depot, PasswordResetToken, Product, Sale, SaleLine, User, Vendor
 
 
 def _login(client, email, password):
     response = client.post("/api/auth/login", json={"email": email, "password": password})
     assert response.status_code == 200
-    return {"Authorization": "Bearer " + response.get_json()["access_token"]}
+    challenge = response.get_json()["mfa_token"]
+    with client.application.app_context():
+        secret = User.query.filter_by(email=email).first().mfa_secret
+    verified = client.post(
+        "/api/auth/mfa/verify",
+        headers={"Authorization": "Bearer " + challenge},
+        json={"code": pyotp.TOTP(secret).now()},
+    )
+    assert verified.status_code == 200
+    return {"Authorization": "Bearer " + verified.get_json()["access_token"]}
 
 
 def _seed_accounts():
@@ -73,6 +83,25 @@ def test_admin_cannot_validate_a_sale(client):
 def test_invalid_login_is_rejected(client):
     response = client.post("/api/auth/login", json={"email": "none@test.tg", "password": "bad"})
     assert response.status_code == 401
+
+
+def test_login_requires_google_authenticator_code(client):
+    with client.application.app_context():
+        _seed_accounts()
+    response = client.post(
+        "/api/auth/login", json={"email": "admin@test.tg", "password": "secret123"}
+    )
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["mfa_required"] is True
+    assert body["mfa_setup_required"] is True
+    assert body["qr_code"].startswith("data:image/png;base64,")
+    refused = client.post(
+        "/api/auth/mfa/verify",
+        headers={"Authorization": "Bearer " + body["mfa_token"]},
+        json={"code": "000000"},
+    )
+    assert refused.status_code == 401
 
 
 def test_password_reset_sends_one_time_link(client, monkeypatch):
@@ -171,7 +200,7 @@ def test_admin_can_create_a_vendor_account_with_phone(client):
         assert db.session.get(Vendor, "22893334444") is not None
 
 
-def test_depository_account_ignores_vendor_phone_field(client):
+def test_depository_account_keeps_whatsapp_phone_for_alerts(client):
     with client.application.app_context():
         _seed_accounts()
         depot_id = Depot.query.filter_by(name="Depot A").first().id
@@ -184,7 +213,7 @@ def test_depository_account_ignores_vendor_phone_field(client):
     assert response.status_code == 201
     with client.application.app_context():
         user = User.query.filter_by(email="nouvelle-depot@test.tg").one()
-        assert user.phone is None
+        assert user.phone == "22894445555"
 
 
 def test_admin_cannot_reuse_a_vendor_phone(client):
@@ -331,3 +360,83 @@ def test_depositaire_performances_are_computed_for_its_depot_only(client):
     rows = response.get_json()
     assert [row["vendor"]["phone"] for row in rows] == ["22890000001"]
     assert rows[0]["total_sales"] == 25000
+
+
+def test_bonus_is_fixed_per_eligible_sale_and_zero_sales_are_not_counted(client, monkeypatch):
+    with client.application.app_context():
+        _seed_accounts()
+        vendor = db.session.get(Vendor, "22890000001")
+        Sale.query.delete()
+        sales = [
+            Sale(vendor_phone=vendor.phone, depot_id=vendor.depot_id, period="Matin", amount=0,
+                 status="validee", declared_at=datetime(2026, 9, 1, 9, 0)),
+            Sale(vendor_phone=vendor.phone, depot_id=vendor.depot_id, period="Matin", amount=18000,
+                 status="validee", declared_at=datetime(2026, 9, 2, 9, 0)),
+            Sale(vendor_phone=vendor.phone, depot_id=vendor.depot_id, period="Matin", amount=18001,
+                 status="validee", declared_at=datetime(2026, 9, 3, 9, 0)),
+        ]
+        db.session.add_all(sales)
+        db.session.commit()
+        ineligible_id, eligible_id = sales[1].id, sales[2].id
+
+    headers = _login(client, "admin@test.tg", "secret123")
+    response = client.get("/api/admin/performances?period=2026-09", headers=headers)
+    row = next(item for item in response.get_json() if item["vendor"]["phone"] == "22890000001")
+    assert row["validated_sales"] == 2
+    assert len(row["daily_sales"]) == 2
+    assert row["suggested_bonus"] == 500
+
+    monkeypatch.setattr("app.whatsapp.send_message", lambda *args: True)
+    refused = client.post("/api/admin/bonuses", headers=headers, json={"sale_id": ineligible_id})
+    assert refused.status_code == 400
+    awarded = client.post("/api/admin/bonuses", headers=headers, json={"sale_id": eligible_id})
+    assert awarded.status_code == 201
+    assert awarded.get_json()["amount"] == 500
+    assert awarded.get_json()["sale_id"] == eligible_id
+    duplicate = client.post("/api/admin/bonuses", headers=headers, json={"sale_id": eligible_id})
+    assert duplicate.status_code == 409
+
+
+def test_product_totals_sum_only_validated_sales(client):
+    with client.application.app_context():
+        _seed_accounts()
+        vendor = db.session.get(Vendor, "22890000001")
+        product = Product(sku="FANXTRA", name="FanXtra")
+        db.session.add(product)
+        db.session.flush()
+        valid = Sale(vendor_phone=vendor.phone, depot_id=vendor.depot_id, period="Matin",
+                     amount=20000, status="validee", declared_at=datetime(2026, 9, 2, 9, 0))
+        pending = Sale(vendor_phone=vendor.phone, depot_id=vendor.depot_id, period="Matin",
+                       amount=30000, status="en_attente", declared_at=datetime(2026, 9, 3, 9, 0))
+        db.session.add_all([valid, pending])
+        db.session.flush()
+        db.session.add_all([
+            SaleLine(sale_id=valid.id, product_id=product.id, quantity=7, subtotal=20000),
+            SaleLine(sale_id=pending.id, product_id=product.id, quantity=99, subtotal=30000),
+        ])
+        db.session.commit()
+    headers = _login(client, "admin@test.tg", "secret123")
+    response = client.get("/api/admin/product-totals?period=2026-09", headers=headers)
+    assert response.status_code == 200
+    totals = {item["sku"]: item["quantity"] for item in response.get_json()}
+    assert totals == {"FANXTRA": 7, "FANCHOCO": 0, "FANVANILLE": 0}
+
+
+def test_all_admin_depot_filters_accept_an_empty_depot(client):
+    with client.application.app_context():
+        _seed_accounts()
+        empty = Depot(name="Depot vide", location="Lome")
+        db.session.add(empty)
+        db.session.commit()
+        depot_id = empty.id
+    headers = _login(client, "admin@test.tg", "secret123")
+    paths = [
+        f"/api/admin/summary?depot_id={depot_id}&period=2026-09",
+        f"/api/admin/performances?depot_id={depot_id}&period=2026-09",
+        f"/api/admin/product-totals?depot_id={depot_id}&period=2026-09",
+        f"/api/admin/vendors?depot_id={depot_id}",
+        f"/api/admin/difficulties?depot_id={depot_id}",
+        f"/api/admin/sales?depot_id={depot_id}",
+        f"/api/admin/stocks?depot_id={depot_id}",
+    ]
+    assert [client.get(path, headers=headers).status_code for path in paths] == [200] * len(paths)

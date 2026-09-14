@@ -1,10 +1,14 @@
 from datetime import date, datetime, timedelta
 from functools import wraps
+import base64
 import hashlib
+import io
 import logging
 import os
 import secrets
 
+import pyotp
+import qrcode
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import create_access_token, get_jwt, get_jwt_identity, jwt_required
 from sqlalchemy import func
@@ -12,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .extensions import db
 from .email_service import send_password_reset_email
-from .models import Bonus, Depot, Difficulty, PasswordResetToken, Performance, Sale, Stock, User, Vendor, utc_now
+from .models import Bonus, Depot, Difficulty, Notification, PasswordResetToken, Performance, Product, Sale, SaleLine, Stock, User, Vendor, utc_now
 
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -24,8 +28,11 @@ def role_required(*roles):
         @wraps(fn)
         @jwt_required()
         def wrapped(*args, **kwargs):
-            if get_jwt().get("role") not in roles:
+            if get_jwt().get("scope") != "authenticated" or get_jwt().get("role") not in roles:
                 return jsonify({"error": "Acces interdit"}), 403
+            user = current_user()
+            if not user or not user.active:
+                return jsonify({"error": "Compte suspendu"}), 401
             return fn(*args, **kwargs)
         return wrapped
     return decorator
@@ -51,6 +58,7 @@ def user_data(user):
         "phone": user.phone,
         "role": user.role,
         "active": user.active,
+        "mfa_enabled": user.mfa_enabled,
         "depot": {"id": user.depot.id, "name": user.depot.name} if user.depot else None,
     }
 
@@ -66,6 +74,53 @@ def month_bounds(value):
     else:
         end = datetime(start.year, start.month + 1, 1)
     return start, end
+
+
+def requested_depot_id():
+    raw_value = request.args.get("depot_id")
+    if raw_value in (None, ""):
+        return None
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return -1
+
+
+def apply_date_filters(query, column):
+    """Applique des bornes inclusives AAAA-MM-JJ aux listes métier."""
+    date_from = request.args.get("date_from", "").strip()
+    date_to = request.args.get("date_to", "").strip()
+    try:
+        if date_from:
+            query = query.filter(column >= datetime.strptime(date_from, "%Y-%m-%d"))
+        if date_to:
+            query = query.filter(column < datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1))
+    except ValueError:
+        return None
+    return query
+
+
+def authenticated_token(user):
+    return create_access_token(
+        identity=str(user.id),
+        additional_claims={
+            "scope": "authenticated", "role": user.role, "depot_id": user.depot_id
+        },
+    )
+
+
+def mfa_setup_payload(user):
+    uri = pyotp.TOTP(user.mfa_secret).provisioning_uri(
+        name=user.email, issuer_name="FanMilk Togo"
+    )
+    image = qrcode.make(uri)
+    stream = io.BytesIO()
+    image.save(stream, format="PNG")
+    return {
+        "manual_key": user.mfa_secret,
+        "provisioning_uri": uri,
+        "qr_code": "data:image/png;base64," + base64.b64encode(stream.getvalue()).decode("ascii"),
+    }
 
 
 def computed_performance_rows(depot_id=None, period_value=None):
@@ -89,6 +144,7 @@ def computed_performance_rows(depot_id=None, period_value=None):
             )
             .filter(
                 Sale.vendor_phone.in_(phones),
+                Sale.amount > 0,
                 Sale.declared_at >= start,
                 Sale.declared_at < end,
             )
@@ -108,6 +164,28 @@ def computed_performance_rows(depot_id=None, period_value=None):
         depot_vendor_counts[vendor.depot_id] = depot_vendor_counts.get(vendor.depot_id, 0) + 1
 
     result = []
+    monthly_sales = Sale.query.filter(
+        Sale.vendor_phone.in_(phones),
+        Sale.status == "validee",
+        Sale.amount > 0,
+        Sale.declared_at >= start,
+        Sale.declared_at < end,
+    ).order_by(Sale.declared_at.desc(), Sale.id.desc()).all() if phones else []
+    bonuses_by_sale = {
+        bonus.sale_id: bonus
+        for bonus in Bonus.query.filter(Bonus.sale_id.isnot(None)).all()
+    }
+    sales_by_vendor = {}
+    for sale in monthly_sales:
+        bonus = bonuses_by_sale.get(sale.id)
+        sales_by_vendor.setdefault(sale.vendor_phone, []).append({
+            "id": sale.id,
+            "date": sale.declared_at.strftime("%Y-%m-%d"),
+            "amount": sale.amount,
+            "eligible": sale.amount > 18000,
+            "bonus_awarded": bonus is not None,
+            "bonus_amount": bonus.amount if bonus else 0,
+        })
     for vendor in vendors:
         stats = aggregates.get(vendor.phone, {})
         validated = stats.get("validee", {"count": 0, "amount": 0})
@@ -116,7 +194,8 @@ def computed_performance_rows(depot_id=None, period_value=None):
         processed_count = validated["count"] + rejected["count"]
         score = round(validated["count"] * 100 / processed_count) if processed_count else 0
         average = round(depot_totals.get(vendor.depot_id, 0) / max(depot_vendor_counts.get(vendor.depot_id, 1), 1))
-        eligible = score >= 80 and validated["amount"] > average and validated["amount"] > 0
+        daily_sales = sales_by_vendor.get(vendor.phone, [])
+        eligible = any(sale["eligible"] and not sale["bonus_awarded"] for sale in daily_sales)
         result.append({
             "vendor": vendor_data(vendor),
             "depot": {"id": vendor.depot.id, "name": vendor.depot.name},
@@ -128,9 +207,70 @@ def computed_performance_rows(depot_id=None, period_value=None):
             "rejected_sales": rejected["count"],
             "pending_sales": pending["count"],
             "eligible": eligible,
-            "suggested_bonus": round(validated["amount"] * 0.05) if eligible else 0,
+            "suggested_bonus": 500 if eligible else 0,
+            "daily_sales": daily_sales,
         })
     return result
+
+
+def product_totals_rows(depot_id=None, period_value=None):
+    query = db.session.query(
+        Product.sku,
+        Product.name,
+        func.coalesce(func.sum(SaleLine.quantity), 0),
+    ).join(SaleLine, SaleLine.product_id == Product.id).join(
+        Sale, Sale.id == SaleLine.sale_id
+    ).filter(Sale.status == "validee", Sale.amount > 0)
+    if depot_id:
+        query = query.filter(Sale.depot_id == depot_id)
+    if period_value:
+        bounds = month_bounds(period_value)
+        if bounds is None:
+            return None
+        query = query.filter(Sale.declared_at >= bounds[0], Sale.declared_at < bounds[1])
+    query = apply_date_filters(query, Sale.declared_at)
+    if query is None:
+        return None
+    totals = {sku: {"sku": sku, "name": name, "quantity": int(quantity or 0)}
+              for sku, name, quantity in query.group_by(Product.sku, Product.name).all()}
+    names = {"FANXTRA": "FanXtra", "FANCHOCO": "FanChoco", "FANVANILLE": "FanVanille"}
+    return [totals.get(sku, {"sku": sku, "name": name, "quantity": 0})
+            for sku, name in names.items()]
+
+
+def product_breakdown_rows(depot_id=None, period_value=None):
+    query = db.session.query(
+        Vendor.phone,
+        Vendor.name,
+        Depot.name,
+        Product.sku,
+        Product.name,
+        func.coalesce(func.sum(SaleLine.quantity), 0),
+    ).join(Sale, Sale.vendor_phone == Vendor.phone).join(
+        SaleLine, SaleLine.sale_id == Sale.id
+    ).join(Product, Product.id == SaleLine.product_id).join(
+        Depot, Depot.id == Sale.depot_id
+    ).filter(Sale.status == "validee", Sale.amount > 0)
+    if depot_id:
+        query = query.filter(Sale.depot_id == depot_id)
+    if period_value:
+        bounds = month_bounds(period_value)
+        if bounds is None:
+            return None
+        query = query.filter(Sale.declared_at >= bounds[0], Sale.declared_at < bounds[1])
+    query = apply_date_filters(query, Sale.declared_at)
+    if query is None:
+        return None
+    rows = query.group_by(
+        Vendor.phone, Vendor.name, Depot.name, Product.sku, Product.name
+    ).order_by(Vendor.name, Product.sku).all()
+    return [{
+        "vendor": {"phone": phone, "name": vendor_name},
+        "depot": depot_name,
+        "sku": sku,
+        "product": product_name,
+        "quantity": int(quantity or 0),
+    } for phone, vendor_name, depot_name, sku, product_name, quantity in rows]
 
 
 def sale_data(sale):
@@ -199,6 +339,7 @@ def bonus_data(item):
         "amount": item.amount,
         "awarded_at": iso(item.awarded_at),
         "awarded_by": item.awarded_by,
+        "sale_id": item.sale_id,
     }
 
 
@@ -209,17 +350,40 @@ def login():
     user = User.query.filter(func.lower(User.email) == email).first()
     if not user or not user.active or not user.check_password(str(payload.get("password", ""))):
         return jsonify({"error": "Identifiants invalides"}), 401
-    token = create_access_token(
+    if user.role == "revendeur":
+        return jsonify({
+            "error": "Les revendeurs utilisent Vendor-Bot sur WhatsApp pour leurs déclarations."
+        }), 403
+    if not user.mfa_secret:
+        user.mfa_secret = pyotp.random_base32()
+        db.session.commit()
+    challenge = create_access_token(
         identity=str(user.id),
-        additional_claims={"role": user.role, "depot_id": user.depot_id},
+        additional_claims={"scope": "mfa_pending"},
+        expires_delta=timedelta(minutes=5),
     )
     return jsonify({
-        "access_token": token,
-        "user": {
-            "id": user.id, "name": user.name, "email": user.email, "phone": user.phone, "role": user.role,
-            "depot": {"id": user.depot.id, "name": user.depot.name, "location": user.depot.location} if user.depot else None,
-        },
+        "mfa_required": True,
+        "mfa_setup_required": not user.mfa_enabled,
+        "mfa_token": challenge,
+        **(mfa_setup_payload(user) if not user.mfa_enabled else {}),
     })
+
+
+@api.post("/auth/mfa/verify")
+@jwt_required()
+def verify_mfa():
+    if get_jwt().get("scope") != "mfa_pending":
+        return jsonify({"error": "Session de vérification invalide"}), 403
+    user = current_user()
+    code = str((request.get_json(silent=True) or {}).get("code", "")).replace(" ", "")
+    if not user or not user.active or not user.mfa_secret:
+        return jsonify({"error": "Compte indisponible"}), 401
+    if not pyotp.TOTP(user.mfa_secret).verify(code, valid_window=1):
+        return jsonify({"error": "Code Google Authenticator invalide"}), 401
+    user.mfa_enabled = True
+    db.session.commit()
+    return jsonify({"access_token": authenticated_token(user), "user": user_data(user)})
 
 
 @api.post("/auth/forgot-password")
@@ -295,18 +459,23 @@ def reset_password():
 @api.get("/me")
 @jwt_required()
 def me():
+    if get_jwt().get("scope") != "authenticated":
+        return jsonify({"error": "Double authentification requise"}), 403
     user = current_user()
     if not user or not user.active:
         return jsonify({"error": "Compte inactif"}), 401
     return jsonify({
         "id": user.id, "name": user.name, "email": user.email, "phone": user.phone, "role": user.role,
         "depot": {"id": user.depot.id, "name": user.depot.name, "location": user.depot.location} if user.depot else None,
+        "mfa_enabled": user.mfa_enabled,
     })
 
 
 @api.patch("/me")
 @jwt_required()
 def update_me():
+    if get_jwt().get("scope") != "authenticated":
+        return jsonify({"error": "Double authentification requise"}), 403
     user = current_user()
     if not user or not user.active:
         return jsonify({"error": "Compte inactif"}), 401
@@ -339,6 +508,39 @@ def update_me():
     })
 
 
+@api.get("/notifications")
+@jwt_required()
+def list_notifications():
+    if get_jwt().get("scope") != "authenticated":
+        return jsonify({"error": "Double authentification requise"}), 403
+    rows = Notification.query.filter_by(recipient_user_id=current_user().id).order_by(
+        Notification.created_at.desc()
+    ).limit(50).all()
+    return jsonify([{
+        "id": item.id,
+        "kind": item.kind,
+        "title": item.title,
+        "message": item.message,
+        "priority": item.priority,
+        "link": item.link,
+        "read": item.read_at is not None,
+        "created_at": iso(item.created_at),
+    } for item in rows])
+
+
+@api.patch("/notifications/<int:item_id>")
+@jwt_required()
+def read_notification(item_id):
+    if get_jwt().get("scope") != "authenticated":
+        return jsonify({"error": "Double authentification requise"}), 403
+    item = Notification.query.filter_by(
+        id=item_id, recipient_user_id=current_user().id
+    ).first_or_404()
+    item.read_at = utc_now()
+    db.session.commit()
+    return jsonify({"id": item.id, "read": True})
+
+
 @api.get("/depositaire/summary")
 @role_required("depositaire")
 def depositaire_summary():
@@ -358,6 +560,9 @@ def depositaire_sales():
     query = Sale.query.filter_by(depot_id=current_user().depot_id)
     if request.args.get("status"):
         query = query.filter_by(status=request.args["status"])
+    query = apply_date_filters(query, Sale.declared_at)
+    if query is None:
+        return jsonify({"error": "Dates invalides"}), 400
     return jsonify([sale_data(item) for item in query.order_by(Sale.declared_at.desc()).all()])
 
 
@@ -392,7 +597,32 @@ def depositaire_stocks():
     query = Stock.query.filter_by(depot_id=current_user().depot_id)
     if request.args.get("status"):
         query = query.filter_by(status=request.args["status"])
+    query = apply_date_filters(query, Stock.declared_at)
+    if query is None:
+        return jsonify({"error": "Dates invalides"}), 400
     return jsonify([stock_data(item) for item in query.order_by(Stock.declared_at.desc()).all()])
+
+
+@api.get("/depositaire/product-totals")
+@role_required("depositaire")
+def depositaire_product_totals():
+    rows = product_totals_rows(
+        depot_id=current_user().depot_id, period_value=request.args.get("period")
+    )
+    if rows is None:
+        return jsonify({"error": "Période invalide"}), 400
+    return jsonify(rows)
+
+
+@api.get("/depositaire/product-breakdown")
+@role_required("depositaire")
+def depositaire_product_breakdown():
+    rows = product_breakdown_rows(
+        depot_id=current_user().depot_id, period_value=request.args.get("period")
+    )
+    if rows is None:
+        return jsonify({"error": "Période invalide"}), 400
+    return jsonify(rows)
 
 
 @api.patch("/depositaire/stocks/<int:stock_id>")
@@ -435,14 +665,22 @@ def depositaire_performances():
 @api.get("/depositaire/bonuses")
 @role_required("depositaire")
 def depositaire_bonuses():
-    rows = Bonus.query.filter_by(depot_id=current_user().depot_id).order_by(Bonus.awarded_at.desc()).all()
+    rows = Bonus.query.filter_by(depot_id=current_user().depot_id).filter(
+        Bonus.sale_id.isnot(None)
+    ).order_by(Bonus.awarded_at.desc()).all()
     return jsonify([bonus_data(item) for item in rows])
 
 
 @api.get("/depositaire/difficulties")
 @role_required("depositaire")
 def depositaire_difficulties():
-    rows = Difficulty.query.filter_by(depot_id=current_user().depot_id).order_by(Difficulty.reported_at.desc()).all()
+    query = apply_date_filters(
+        Difficulty.query.filter_by(depot_id=current_user().depot_id),
+        Difficulty.reported_at,
+    )
+    if query is None:
+        return jsonify({"error": "Dates invalides"}), 400
+    rows = query.order_by(Difficulty.reported_at.desc()).all()
     return jsonify([difficulty_data(item) for item in rows])
 
 
@@ -462,7 +700,9 @@ def admin_summary():
     if bounds is None:
         return jsonify({"error": "Periode invalide, format attendu AAAA-MM"}), 400
     start, end = bounds
-    depot_id = request.args.get("depot_id")
+    depot_id = requested_depot_id()
+    if depot_id == -1:
+        return jsonify({"error": "Dépôt invalide"}), 400
     revenue_query = db.select(func.coalesce(func.sum(Sale.amount), 0)).where(
         Sale.status == "validee", Sale.declared_at >= start, Sale.declared_at < end
     )
@@ -471,7 +711,7 @@ def admin_summary():
         Difficulty.state != "resolue", Difficulty.reported_at >= start, Difficulty.reported_at < end
     )
     bonuses_query = db.select(func.coalesce(func.sum(Bonus.amount), 0)).where(
-        Bonus.awarded_at >= start, Bonus.awarded_at < end
+        Bonus.sale_id.isnot(None), Bonus.awarded_at >= start, Bonus.awarded_at < end
     )
     if depot_id:
         revenue_query = revenue_query.where(Sale.depot_id == depot_id)
@@ -496,8 +736,11 @@ def list_users():
 @role_required("administrateur")
 def list_vendors():
     query = Vendor.query
-    if request.args.get("depot_id"):
-        query = query.filter_by(depot_id=request.args["depot_id"])
+    depot_id = requested_depot_id()
+    if depot_id == -1:
+        return jsonify({"error": "Dépôt invalide"}), 400
+    if depot_id:
+        query = query.filter_by(depot_id=depot_id)
     rows = query.order_by(Vendor.name).all()
     phones = [item.phone for item in rows]
     sale_counts = dict(
@@ -537,7 +780,7 @@ def create_user():
     user = User(
         name=payload["name"],
         email=str(payload["email"]).lower(),
-        phone=phone if role == "revendeur" else None,
+        phone=phone,
         role=role,
         depot_id=depot_id,
     )
@@ -591,7 +834,7 @@ def update_user(user_id):
     user.email = email
     user.role = role
     user.depot_id = None if role == "administrateur" else depot_id
-    user.phone = phone if role == "revendeur" else None
+    user.phone = phone
     user.active = active
     if payload.get("password"):
         user.set_password(payload["password"])
@@ -616,8 +859,11 @@ def update_user(user_id):
 @api.get("/admin/performances")
 @role_required("administrateur")
 def admin_performances():
+    depot_id = requested_depot_id()
+    if depot_id == -1:
+        return jsonify({"error": "Dépôt invalide"}), 400
     rows = computed_performance_rows(
-        depot_id=request.args.get("depot_id"),
+        depot_id=depot_id,
         period_value=request.args.get("period"),
     )
     if rows is None:
@@ -625,20 +871,77 @@ def admin_performances():
     return jsonify(rows)
 
 
+@api.get("/admin/product-totals")
+@role_required("administrateur")
+def admin_product_totals():
+    depot_id = requested_depot_id()
+    if depot_id == -1:
+        return jsonify({"error": "Dépôt invalide"}), 400
+    rows = product_totals_rows(depot_id=depot_id, period_value=request.args.get("period"))
+    if rows is None:
+        return jsonify({"error": "Periode invalide, format attendu AAAA-MM"}), 400
+    return jsonify(rows)
+
+
+@api.get("/admin/product-breakdown")
+@role_required("administrateur")
+def admin_product_breakdown():
+    depot_id = requested_depot_id()
+    if depot_id == -1:
+        return jsonify({"error": "Dépôt invalide"}), 400
+    rows = product_breakdown_rows(depot_id=depot_id, period_value=request.args.get("period"))
+    if rows is None:
+        return jsonify({"error": "Période invalide"}), 400
+    return jsonify(rows)
+
+
 @api.route("/admin/bonuses", methods=["GET", "POST"])
 @role_required("administrateur")
 def admin_bonuses():
     if request.method == "GET":
-        return jsonify([bonus_data(item) for item in Bonus.query.order_by(Bonus.awarded_at.desc()).all()])
+        depot_id = requested_depot_id()
+        if depot_id == -1:
+            return jsonify({"error": "Dépôt invalide"}), 400
+        query = Bonus.query.filter(Bonus.sale_id.isnot(None))
+        if depot_id:
+            query = query.filter_by(depot_id=depot_id)
+        period = request.args.get("period")
+        if period:
+            bounds = month_bounds(period)
+            if bounds is None:
+                return jsonify({"error": "Periode invalide, format attendu AAAA-MM"}), 400
+            query = query.join(Sale, Sale.id == Bonus.sale_id).filter(
+                Sale.declared_at >= bounds[0], Sale.declared_at < bounds[1]
+            )
+        return jsonify([bonus_data(item) for item in query.order_by(Bonus.awarded_at.desc()).all()])
     payload = request.get_json(silent=True) or {}
-    vendor = db.session.get(Vendor, payload.get("vendor_phone"))
-    if not vendor or not payload.get("period") or int(payload.get("amount", 0)) <= 0:
-        return jsonify({"error": "Revendeur, periode et montant positif sont obligatoires"}), 400
-    item = Bonus(vendor_phone=vendor.phone, depot_id=vendor.depot_id, period=payload["period"], amount=int(payload["amount"]), awarded_by=current_user().id)
+    sale = db.session.get(Sale, payload.get("sale_id"))
+    if not sale or sale.status != "validee":
+        return jsonify({"error": "Vente validée introuvable"}), 400
+    if sale.amount <= 18000:
+        return jsonify({"error": "La vente doit dépasser 18 000 FCFA"}), 400
+    if Bonus.query.filter_by(sale_id=sale.id).first():
+        return jsonify({"error": "La prime de cette vente a déjà été attribuée"}), 409
+    item = Bonus(
+        vendor_phone=sale.vendor_phone,
+        depot_id=sale.depot_id,
+        period=sale.declared_at.strftime("%Y-%m-%d"),
+        amount=500,
+        awarded_by=current_user().id,
+        sale_id=sale.id,
+    )
     db.session.add(item)
     db.session.commit()
-    from .whatsapp import send_message
-    send_message(vendor.phone, "Une prime de {} FCFA vous a ete attribuee pour {}.".format(item.amount, item.period))
+    from .notifications import notify_users, recipients_for_depot
+    notify_users(
+        recipients_for_depot(sale.depot_id, include_admin=False, depositaires_only=True),
+        "prime",
+        "Prime attribuée à {}".format(sale.vendor.name),
+        "Une prime de 500 FCFA a été attribuée pour la vente du {} ({} FCFA).".format(
+            item.period, sale.amount
+        ),
+        "/depositaire/primes",
+    )
     return jsonify(bonus_data(item)), 201
 
 
@@ -646,8 +949,14 @@ def admin_bonuses():
 @role_required("administrateur")
 def admin_difficulties():
     query = Difficulty.query
-    if request.args.get("depot_id"):
-        query = query.filter_by(depot_id=request.args["depot_id"])
+    depot_id = requested_depot_id()
+    if depot_id == -1:
+        return jsonify({"error": "Dépôt invalide"}), 400
+    if depot_id:
+        query = query.filter_by(depot_id=depot_id)
+    query = apply_date_filters(query, Difficulty.reported_at)
+    if query is None:
+        return jsonify({"error": "Dates invalides"}), 400
     return jsonify([difficulty_data(item) for item in query.order_by(Difficulty.reported_at.desc()).all()])
 
 
@@ -668,8 +977,14 @@ def update_difficulty(item_id):
 @role_required("administrateur")
 def admin_sales():
     query = Sale.query
-    if request.args.get("depot_id"):
-        query = query.filter_by(depot_id=request.args["depot_id"])
+    depot_id = requested_depot_id()
+    if depot_id == -1:
+        return jsonify({"error": "Dépôt invalide"}), 400
+    if depot_id:
+        query = query.filter_by(depot_id=depot_id)
+    query = apply_date_filters(query, Sale.declared_at)
+    if query is None:
+        return jsonify({"error": "Dates invalides"}), 400
     return jsonify([sale_data(item) for item in query.order_by(Sale.declared_at.desc()).all()])
 
 
@@ -677,8 +992,14 @@ def admin_sales():
 @role_required("administrateur")
 def admin_stocks():
     query = Stock.query
-    if request.args.get("depot_id"):
-        query = query.filter_by(depot_id=request.args["depot_id"])
+    depot_id = requested_depot_id()
+    if depot_id == -1:
+        return jsonify({"error": "Dépôt invalide"}), 400
+    if depot_id:
+        query = query.filter_by(depot_id=depot_id)
+    query = apply_date_filters(query, Stock.declared_at)
+    if query is None:
+        return jsonify({"error": "Dates invalides"}), 400
     return jsonify([stock_data(item) for item in query.order_by(Stock.declared_at.desc()).all()])
 
 

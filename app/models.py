@@ -29,6 +29,8 @@ class User(db.Model):
     role = db.Column(db.String(32), nullable=False)
     depot_id = db.Column(db.Integer, db.ForeignKey("depots.id"), index=True)
     active = db.Column(db.Boolean, nullable=False, default=True)
+    mfa_secret = db.Column(db.String(64))
+    mfa_enabled = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
     updated_at = db.Column(db.DateTime, nullable=False, default=utc_now, onupdate=utc_now)
     depot = db.relationship("Depot")
@@ -167,8 +169,10 @@ class Bonus(db.Model):
     amount = db.Column(db.BigInteger, nullable=False)
     awarded_at = db.Column(db.DateTime, nullable=False, default=utc_now)
     awarded_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    sale_id = db.Column(db.Integer, db.ForeignKey("sales.id"), unique=True, index=True)
     vendor = db.relationship("Vendor")
     depot = db.relationship("Depot")
+    sale = db.relationship("Sale")
 
 
 class BotSession(db.Model):
@@ -183,3 +187,19 @@ class ProcessedMessage(db.Model):
     __tablename__ = "processed_messages"
     message_id = db.Column(db.String(191), primary_key=True)
     processed_at = db.Column(db.DateTime, nullable=False, default=utc_now, index=True)
+
+
+class Notification(db.Model):
+    __tablename__ = "notifications"
+    id = db.Column(db.Integer, primary_key=True)
+    recipient_user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind = db.Column(db.String(32), nullable=False, default="information")
+    title = db.Column(db.String(180), nullable=False)
+    message = db.Column(db.Text, nullable=False, default="")
+    priority = db.Column(db.String(16), nullable=False, default="normale")
+    link = db.Column(db.String(255), nullable=False, default="")
+    read_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now, index=True)
+    recipient = db.relationship("User")

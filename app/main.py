@@ -7,13 +7,14 @@ import hashlib
 import hmac
 import logging
 import os
+from datetime import datetime
 from collections import defaultdict
 from threading import Lock
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from .conversation import handle_message
 from .extensions import db, jwt
@@ -94,6 +95,49 @@ def _database_provider():
 def init_db_command():
     """Cree les tables PostgreSQL et les donnees de reference."""
     db.create_all()
+    user_columns = {column["name"] for column in inspect(db.engine).get_columns("users")}
+    if "mfa_secret" not in user_columns:
+        db.session.execute(text("ALTER TABLE users ADD COLUMN mfa_secret VARCHAR(64)"))
+    if "mfa_enabled" not in user_columns:
+        db.session.execute(text("ALTER TABLE users ADD COLUMN mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
+    db.session.commit()
+    columns = {column["name"] for column in inspect(db.engine).get_columns("bonuses")}
+    if "sale_id" not in columns:
+        db.session.execute(text(
+            "ALTER TABLE bonuses ADD COLUMN sale_id INTEGER REFERENCES sales(id)"
+        ))
+        db.session.commit()
+
+    # Rattache les anciennes primes mensuelles aux ventes éligibles, dans l'ordre.
+    from .models import Bonus, Sale
+    for bonus in Bonus.query.filter_by(sale_id=None).order_by(Bonus.id).all():
+        try:
+            period_start = datetime.strptime(bonus.period[:7], "%Y-%m")
+        except (TypeError, ValueError):
+            continue
+        period_end = (
+            datetime(period_start.year + 1, 1, 1)
+            if period_start.month == 12
+            else datetime(period_start.year, period_start.month + 1, 1)
+        )
+        linked_sale_ids = db.select(Bonus.sale_id).where(Bonus.sale_id.isnot(None))
+        sale = Sale.query.filter(
+            Sale.vendor_phone == bonus.vendor_phone,
+            Sale.status == "validee",
+            Sale.amount > 18000,
+            Sale.declared_at >= period_start,
+            Sale.declared_at < period_end,
+            Sale.id.not_in(linked_sale_ids),
+        ).order_by(Sale.declared_at, Sale.id).first()
+        if sale:
+            bonus.sale_id = sale.id
+            bonus.period = sale.declared_at.strftime("%Y-%m-%d")
+            bonus.amount = 500
+    db.session.commit()
+    db.session.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_bonuses_sale_id ON bonuses (sale_id)"
+    ))
+    db.session.commit()
     depot_names = ["GERM DOSSEH", "SUPER DEPOT", "NBUKE RAMCO", "NADONIELLA A", "SAINT MARTIN", "YEHONAM"]
     for name in depot_names:
         if not Depot.query.filter_by(name=name).first():

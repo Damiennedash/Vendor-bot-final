@@ -80,7 +80,7 @@ def test_sales_and_difficulty_questions_stay_in_order(client):
         ("3", "Combien de *FanChoco*"),
         ("4", "Combien de *FanVanille*"),
         ("5", "Ou avez-vous vendu *aujourd hui*"),
-        ("1", "probleme *au cours de la journee*"),
+        ("1", "probleme pour atteindre vos objectifs *aujourd hui*"),
         ("1", "Probleme Produit"),
         ("Ety", "Votre declaration a bien ete enregistree"),
     ]
@@ -93,3 +93,22 @@ def test_sales_and_difficulty_questions_stay_in_order(client):
     session = db.session.get(BotSession, phone)
     assert session.step == "start"
     assert session.data == {}
+
+
+def test_two_completed_sales_on_the_same_day_remain_separate(client):
+    base = [
+        "14/09/2026", "09:00", "Matin", "22891112222", "Afi", "YEHONAM",
+        "J ai deja vendu", "20000", "2", "1", "0", "Marche", "-", "", "",
+    ]
+    append_declaration(base + ["WhatsApp - saisie en cours"])
+    append_declaration(base + ["WhatsApp"])
+    second = list(base)
+    second[1] = "15:30"
+    second[7] = "25000"
+    append_declaration(second + ["WhatsApp - saisie en cours"])
+    append_declaration(second + ["WhatsApp"])
+
+    rows = Sale.query.filter_by(vendor_phone="22891112222").order_by(Sale.id).all()
+    assert len(rows) == 2
+    assert [row.amount for row in rows] == [20000, 25000]
+    assert all(row.source == "WhatsApp" for row in rows)
