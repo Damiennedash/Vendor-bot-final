@@ -198,11 +198,26 @@ def test_password_reset_keeps_unknown_email_private(client, monkeypatch):
 
 def test_password_reset_reports_missing_email_configuration(client, monkeypatch):
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("FANMILK_EMAIL_API_KEY", raising=False)
     response = client.post(
         "/api/auth/forgot-password", json={"email": "admin@test.tg"}
     )
     assert response.status_code == 503
     assert "configuré" in response.get_json()["error"]
+
+
+def test_password_reset_accepts_render_fallback_key(client, monkeypatch):
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    monkeypatch.setenv("FANMILK_EMAIL_API_KEY", "test-key")
+    with client.application.app_context():
+        _seed_accounts()
+    monkeypatch.setattr("app.api.send_password_reset_email", lambda *args: None)
+
+    response = client.post(
+        "/api/auth/forgot-password", json={"email": "admin@test.tg"}
+    )
+
+    assert response.status_code == 200
 
 
 def test_user_can_update_own_profile(client):

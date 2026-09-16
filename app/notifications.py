@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from flask import current_app
 
-from .email_service import send_notification_email
+from .email_service import email_is_configured, send_notification_email
 from .extensions import db
 from .models import Notification, User, utc_now
 
@@ -57,7 +57,7 @@ def _deliver(notification_id):
         if email_ok and whatsapp_ok:
             break
     notification.email_status = (
-        "envoye" if email_ok else ("non_configure" if not os.getenv("RESEND_API_KEY", "").strip() else "echoue")
+        "envoye" if email_ok else ("non_configure" if not email_is_configured() else "echoue")
     )
     if notification.whatsapp_status != "ignore":
         notification.whatsapp_status = "envoye" if whatsapp_ok else "echoue"

@@ -15,7 +15,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from .extensions import db
-from .email_service import send_password_reset_email
+from .email_service import email_is_configured, send_password_reset_email
 from .audit import record_audit
 from .models import AuditLog, Bonus, Depot, Difficulty, MfaRecoveryCode, Notification, PasswordResetToken, Performance, Product, ProductTarget, Sale, SaleLine, Stock, User, Vendor, utc_now
 from .notifications import retry_notification
@@ -437,7 +437,7 @@ def forgot_password():
     email = str(payload.get("email", "")).strip().lower()
     message = "Si ce compte existe, le lien de réinitialisation vient d'être envoyé. Vérifiez aussi vos spams."
 
-    if not os.getenv("RESEND_API_KEY", "").strip():
+    if not email_is_configured():
         return jsonify({
             "error": "L'envoi d'e-mail n'est pas encore configuré. Contactez l'administrateur FanMilk."
         }), 503
@@ -1087,7 +1087,7 @@ def reset_user_mfa(user_id):
 @role_required("administrateur")
 def system_status():
     return jsonify({
-        "email_configured": bool(os.getenv("RESEND_API_KEY", "").strip()),
+        "email_configured": email_is_configured(),
         "whatsapp_configured": bool(os.getenv("WHATSAPP_TOKEN", "").strip()),
         "frontend_url": os.getenv("FRONTEND_URL", "").strip(),
         "database": "connectee",

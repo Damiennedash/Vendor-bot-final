@@ -8,9 +8,21 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+def get_email_api_key():
+    """Return the Resend key, including the Render-specific fallback name."""
+    return (
+        os.getenv("RESEND_API_KEY", "").strip()
+        or os.getenv("FANMILK_EMAIL_API_KEY", "").strip()
+    )
+
+
+def email_is_configured():
+    return bool(get_email_api_key())
+
+
 def send_notification_email(recipient, subject, title, message):
     """Envoie une notification métier via Resend."""
-    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    api_key = get_email_api_key()
     if not api_key:
         logger.warning("Notification e-mail ignorée : RESEND_API_KEY manquante")
         return False
@@ -35,7 +47,7 @@ def send_notification_email(recipient, subject, title, message):
 
 def send_password_reset_email(recipient, recipient_name, reset_url):
     """Envoie le lien de récupération via l'API HTTP Resend."""
-    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    api_key = get_email_api_key()
     if not api_key:
         raise RuntimeError("RESEND_API_KEY manquante")
 
