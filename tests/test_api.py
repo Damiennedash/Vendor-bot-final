@@ -199,6 +199,8 @@ def test_password_reset_keeps_unknown_email_private(client, monkeypatch):
 def test_password_reset_reports_missing_email_configuration(client, monkeypatch):
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.delenv("FANMILK_EMAIL_API_KEY", raising=False)
+    monkeypatch.delenv("SMTP_USERNAME", raising=False)
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
     response = client.post(
         "/api/auth/forgot-password", json={"email": "admin@test.tg"}
     )

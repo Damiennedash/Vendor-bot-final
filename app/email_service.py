@@ -1,5 +1,7 @@
 import logging
 import os
+import smtplib
+from email.message import EmailMessage
 from html import escape
 
 import requests
@@ -16,65 +18,103 @@ def get_email_api_key():
     )
 
 
+def get_smtp_config():
+    """Return SMTP settings without exposing the password to callers or logs."""
+    username = os.getenv("SMTP_USERNAME", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "").replace(" ", "").strip()
+    if not username or not password:
+        return None
+    return {
+        "host": os.getenv("SMTP_HOST", "smtp.gmail.com").strip() or "smtp.gmail.com",
+        "port": int(os.getenv("SMTP_PORT", "587").strip() or "587"),
+        "username": username,
+        "password": password,
+        "sender": os.getenv("SMTP_FROM", "FanMilk Togo <{}>".format(username)).strip(),
+    }
+
+
 def email_is_configured():
-    return bool(get_email_api_key())
+    return bool(get_smtp_config() or get_email_api_key())
 
 
-def send_notification_email(recipient, subject, title, message):
-    """Envoie une notification métier via Resend."""
+def _send_via_smtp(recipient, subject, html):
+    config = get_smtp_config()
+    if not config:
+        return False
+
+    message = EmailMessage()
+    message["From"] = config["sender"]
+    message["To"] = recipient
+    message["Subject"] = subject
+    message.set_content("Ce message FanMilk nécessite un client de messagerie compatible HTML.")
+    message.add_alternative(html, subtype="html")
+
+    with smtplib.SMTP(config["host"], config["port"], timeout=15) as smtp:
+        smtp.ehlo()
+        smtp.starttls()
+        smtp.ehlo()
+        smtp.login(config["username"], config["password"])
+        smtp.send_message(message)
+    return True
+
+
+def _send_via_resend(recipient, subject, html, sender_env):
     api_key = get_email_api_key()
     if not api_key:
-        logger.warning("Notification e-mail ignorée : RESEND_API_KEY manquante")
         return False
     sender = os.getenv(
-        "NOTIFICATION_EMAIL_FROM",
+        sender_env,
         os.getenv("RESET_EMAIL_FROM", "FanMilk Togo <onboarding@resend.dev>"),
     ).strip()
     response = requests.post(
         "https://api.resend.com/emails",
         headers={"Authorization": "Bearer {}".format(api_key), "Content-Type": "application/json"},
-        json={
-            "from": sender,
-            "to": [recipient],
-            "subject": subject,
-            "html": "<h2>{}</h2><p>{}</p>".format(escape(title), escape(message).replace("\n", "<br>")),
-        },
+        json={"from": sender, "to": [recipient], "subject": subject, "html": html},
         timeout=15,
     )
     response.raise_for_status()
     return True
 
 
-def send_password_reset_email(recipient, recipient_name, reset_url):
-    """Envoie le lien de récupération via l'API HTTP Resend."""
-    api_key = get_email_api_key()
-    if not api_key:
-        raise RuntimeError("RESEND_API_KEY manquante")
+def _send_email(recipient, subject, html, sender_env):
+    # Gmail SMTP is preferred when configured; Resend remains a compatible fallback.
+    if get_smtp_config():
+        return _send_via_smtp(recipient, subject, html)
+    return _send_via_resend(recipient, subject, html, sender_env)
 
-    sender = os.getenv(
-        "RESET_EMAIL_FROM", "FanMilk Togo <onboarding@resend.dev>"
-    ).strip()
-    response = requests.post(
-        "https://api.resend.com/emails",
-        headers={
-            "Authorization": "Bearer {}".format(api_key),
-            "Content-Type": "application/json",
-        },
-        json={
-            "from": sender,
-            "to": [recipient],
-            "subject": "Réinitialisation de votre mot de passe FanMilk",
-            "html": (
-                "<p>Bonjour {},</p>"
-                "<p>Vous avez demandé à modifier votre mot de passe FanMilk.</p>"
-                "<p><a href=\"{}\" style=\"display:inline-block;padding:12px 20px;"
-                "background:#0a4ea8;color:#fff;text-decoration:none;border-radius:10px\">"
-                "Choisir un nouveau mot de passe</a></p>"
-                "<p>Ce lien est valable pendant 30 minutes et ne peut être utilisé qu'une fois.</p>"
-                "<p>Si vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail.</p>"
-            ).format(escape(recipient_name), escape(reset_url, quote=True)),
-        },
-        timeout=15,
+
+def send_notification_email(recipient, subject, title, message):
+    """Envoie une notification métier via Gmail SMTP ou Resend."""
+    if not email_is_configured():
+        logger.warning("Notification e-mail ignorée : aucun transport configuré")
+        return False
+    return _send_email(
+        recipient,
+        subject,
+        "<h2>{}</h2><p>{}</p>".format(
+            escape(title), escape(message).replace("\n", "<br>")
+        ),
+        "NOTIFICATION_EMAIL_FROM",
     )
-    response.raise_for_status()
+
+
+def send_password_reset_email(recipient, recipient_name, reset_url):
+    """Envoie le lien de récupération via Gmail SMTP ou Resend."""
+    if not email_is_configured():
+        raise RuntimeError("Aucun transport e-mail configuré")
+
+    _send_email(
+        recipient,
+        "Réinitialisation de votre mot de passe FanMilk",
+        (
+            "<p>Bonjour {},</p>"
+            "<p>Vous avez demandé à modifier votre mot de passe FanMilk.</p>"
+            "<p><a href=\"{}\" style=\"display:inline-block;padding:12px 20px;"
+            "background:#0a4ea8;color:#fff;text-decoration:none;border-radius:10px\">"
+            "Choisir un nouveau mot de passe</a></p>"
+            "<p>Ce lien est valable pendant 30 minutes et ne peut être utilisé qu'une fois.</p>"
+            "<p>Si vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail.</p>"
+        ).format(escape(recipient_name), escape(reset_url, quote=True)),
+        "RESET_EMAIL_FROM",
+    )
     logger.info("E-mail de récupération envoyé à %s", recipient)
