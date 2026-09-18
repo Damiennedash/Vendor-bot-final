@@ -368,7 +368,13 @@ def bonus_data(item):
 def login():
     payload = request.get_json(silent=True) or {}
     email = str(payload.get("email", "")).strip().lower()
-    user = User.query.filter(func.lower(User.email) == email).first()
+    # Les adresses sont normalisées en minuscules à la création. Une comparaison
+    # directe permet à PostgreSQL d'utiliser l'index unique au lieu de parcourir
+    # toute la table avec LOWER(email) à chaque connexion.
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        # Compatibilité avec d'anciens comptes saisis avant la normalisation.
+        user = User.query.filter(func.lower(User.email) == email).first()
     if not user or not user.active or not user.check_password(str(payload.get("password", ""))):
         return jsonify({"error": "Identifiants invalides"}), 401
     if user.role == "revendeur":
@@ -462,7 +468,7 @@ def forgot_password():
     db.session.commit()
 
     frontend_url = os.getenv(
-        "FRONTEND_URL", "https://fanmilk-togo-dashboard.djatadamienne5.chatgpt.site"
+        "FRONTEND_URL", "https://fanmilk-togo.damiennedash.workers.dev"
     ).rstrip("/")
     reset_url = "{}/reinitialisation?token={}".format(frontend_url, raw_token)
     try:
