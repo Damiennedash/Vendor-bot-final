@@ -467,9 +467,10 @@ def forgot_password():
     db.session.add(reset_token)
     db.session.commit()
 
-    frontend_url = os.getenv(
-        "FRONTEND_URL", "https://fanmilk-togo.damiennedash.workers.dev"
-    ).rstrip("/")
+    # Le lien doit toujours revenir vers le site public utilisé par les équipes.
+    # On n'utilise plus l'ancienne URL Sites privée, même si une variable Render
+    # historique est encore présente.
+    frontend_url = "https://fanmilk-togo.damiennedash.workers.dev"
     reset_url = "{}/reinitialisation?token={}".format(frontend_url, raw_token)
     try:
         send_password_reset_email(user.email, user.name, reset_url)
