@@ -4,6 +4,7 @@ Envoi de messages via WhatsApp Cloud API (Meta).
 Supporte : texte simple, boutons (max 3), liste interactive (max 10)
 """
 import os
+import re
 import requests
 import logging
 logger = logging.getLogger(__name__)
@@ -40,6 +41,46 @@ def send_message(to, text):
        "text":              {"preview_url": False, "body": text},
    }
    return _post(to, payload)
+
+
+def send_template(to, template_name, body_parameters=None, language_code="fr"):
+   """Envoie un modèle Meta approuvé, utilisable hors de la fenêtre de 24 h."""
+   parameters = [
+       {"type": "text", "text": str(value)[:1024]}
+       for value in (body_parameters or [])
+   ]
+   template = {
+       "name": template_name,
+       "language": {"code": language_code},
+   }
+   if parameters:
+       template["components"] = [{
+           "type": "body",
+           "parameters": parameters,
+       }]
+   payload = {
+       "messaging_product": "whatsapp",
+       "recipient_type": "individual",
+       "to": to,
+       "type": "template",
+       "template": template,
+   }
+   return _post(to, payload)
+
+
+def send_notification(to, title, message, urgent=False):
+   """Envoie une alerte proactive avec le modèle configuré, sinon un texte libre."""
+   prefix = "URGENCE - " if urgent else ""
+   body = "{}{}\n\n{}".format(prefix, title, message).strip()
+   template_name = os.getenv("WHATSAPP_NOTIFICATION_TEMPLATE", "").strip()
+   if template_name:
+       return send_template(
+           to,
+           template_name,
+           [body],
+           os.getenv("WHATSAPP_NOTIFICATION_LANGUAGE", "fr").strip() or "fr",
+       )
+   return send_message(to, body)
 
 def send_buttons(to, body, buttons):
    """
@@ -96,6 +137,13 @@ def _post(to, payload):
     headers = _headers()
     if not url or not headers:
         return False
+
+    # Meta attend un numéro international composé uniquement de chiffres.
+    normalized_to = re.sub(r"\D", "", str(to or ""))
+    if not normalized_to:
+        logger.error("Numero WhatsApp destinataire invalide")
+        return False
+    payload["to"] = normalized_to
 
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=10)

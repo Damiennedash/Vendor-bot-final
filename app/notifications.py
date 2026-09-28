@@ -29,7 +29,6 @@ def _deliver(notification_id):
     if not notification:
         return
     user = notification.recipient
-    prefix = "🚨 URGENCE\n\n" if notification.priority == "urgente" else ""
     errors = []
     email_ok = notification.email_status == "envoye"
     whatsapp_ok = notification.whatsapp_status in {"envoye", "ignore"}
@@ -46,10 +45,12 @@ def _deliver(notification_id):
             notification.whatsapp_status = "ignore"
         elif not whatsapp_ok:
             try:
-                from .whatsapp import send_message
-                whatsapp_ok = bool(send_message(
+                from .whatsapp import send_notification
+                whatsapp_ok = bool(send_notification(
                     user.phone,
-                    prefix + "*{}*\n\n{}".format(notification.title, notification.message),
+                    notification.title,
+                    notification.message,
+                    urgent=notification.priority == "urgente",
                 ))
             except Exception as exc:
                 errors.append("WhatsApp: {}".format(str(exc)[:180]))
