@@ -10,6 +10,20 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+def get_brevo_config():
+    """Return the HTTPS Brevo transport used on Render's free plan."""
+    api_key = os.getenv("BREVO_API_KEY", "").strip()
+    sender_email = os.getenv("BREVO_SENDER_EMAIL", "").strip()
+    if not api_key or not sender_email:
+        return None
+    return {
+        "api_key": api_key,
+        "sender_email": sender_email,
+        "sender_name": os.getenv("BREVO_SENDER_NAME", "FanMilk Togo").strip()
+        or "FanMilk Togo",
+    }
+
+
 def get_email_api_key():
     """Return the Resend key, including the Render-specific fallback name."""
     return (
@@ -34,7 +48,33 @@ def get_smtp_config():
 
 
 def email_is_configured():
-    return bool(get_smtp_config() or get_email_api_key())
+    return bool(get_brevo_config() or get_smtp_config() or get_email_api_key())
+
+
+def _send_via_brevo(recipient, subject, html):
+    config = get_brevo_config()
+    if not config:
+        return False
+    response = requests.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={
+            "api-key": config["api_key"],
+            "accept": "application/json",
+            "content-type": "application/json",
+        },
+        json={
+            "sender": {
+                "name": config["sender_name"],
+                "email": config["sender_email"],
+            },
+            "to": [{"email": recipient}],
+            "subject": subject,
+            "htmlContent": html,
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    return True
 
 
 def _send_via_smtp(recipient, subject, html):
@@ -77,7 +117,10 @@ def _send_via_resend(recipient, subject, html, sender_env):
 
 
 def _send_email(recipient, subject, html, sender_env):
-    # Gmail SMTP is preferred when configured; Resend remains a compatible fallback.
+    # Render's free plan blocks SMTP ports. Prefer Brevo's HTTPS API when configured,
+    # then retain Gmail SMTP and Resend for compatible hosting environments.
+    if get_brevo_config():
+        return _send_via_brevo(recipient, subject, html)
     if get_smtp_config():
         return _send_via_smtp(recipient, subject, html)
     return _send_via_resend(recipient, subject, html, sender_env)

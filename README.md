@@ -59,9 +59,13 @@ Les identifiants locaux sont dans `.env` (`ADMIN_EMAIL`, `ADMIN_PASSWORD`,
 - `POST /api/auth/reset-password`
 - `GET /api/me`
 
-La récupération de mot de passe utilise Resend. En production, renseignez
-`RESEND_API_KEY`, `RESET_EMAIL_FROM` et `FRONTEND_URL`. Le lien envoyé est
-valable 30 minutes et ne peut être utilisé qu'une fois.
+Sur l'offre gratuite Render, utilisez l'API HTTPS Brevo, car Render bloque les
+ports SMTP 25, 465 et 587. Renseignez `BREVO_API_KEY`,
+`BREVO_SENDER_EMAIL` et, facultativement, `BREVO_SENDER_NAME`. Gmail SMTP
+(`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`) et
+Resend (`RESEND_API_KEY`, `RESET_EMAIL_FROM`) restent disponibles sur les
+hébergements compatibles. Le lien envoyé est valable 30 minutes et ne peut
+être utilisé qu'une fois.
 
 ### Depositaire
 
