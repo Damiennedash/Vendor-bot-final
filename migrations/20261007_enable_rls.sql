@@ -22,4 +22,32 @@ ALTER TABLE public.stocks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.vendors ENABLE ROW LEVEL SECURITY;
 
+-- Le role utilise pour executer cette migration est aussi celui du backend
+-- Flask. On lui accorde explicitement l'acces total; anon/authenticated ne
+-- figurent dans aucune politique et restent donc bloques par RLS.
+DO $fanmilk$
+DECLARE
+  table_name text;
+  protected_tables text[] := ARRAY[
+    'audit_logs', 'bonuses', 'bot_sessions', 'depots', 'difficulties',
+    'mfa_recovery_codes', 'notifications', 'password_reset_tokens',
+    'performances', 'processed_messages', 'product_targets', 'products',
+    'sale_lines', 'sales', 'stocks', 'users', 'vendors'
+  ];
+BEGIN
+  FOREACH table_name IN ARRAY protected_tables LOOP
+    EXECUTE format(
+      'DROP POLICY IF EXISTS fanmilk_backend_full_access ON public.%I',
+      table_name
+    );
+    EXECUTE format(
+      'CREATE POLICY fanmilk_backend_full_access ON public.%I '
+      'FOR ALL TO %I USING (true) WITH CHECK (true)',
+      table_name,
+      current_user
+    );
+  END LOOP;
+END
+$fanmilk$;
+
 COMMIT;
