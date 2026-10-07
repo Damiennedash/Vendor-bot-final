@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from sqlalchemy import inspect, text
 
 from .conversation import handle_message
+from .database_security import enable_row_level_security
 from .extensions import db, jwt
 from .models import Depot, Product, User
 from .repository import (
@@ -157,6 +158,21 @@ def init_db_command():
     ):
         db.session.execute(text(statement))
     db.session.commit()
+
+    # Supabase expose le schema public a PostgREST. Sans RLS, ses conseillers de
+    # securite classent chaque table comme critique. Aucune politique publique
+    # n'est creee : l'API Supabase reste fermee par defaut, tandis que Flask se
+    # connecte directement a PostgreSQL avec le role proprietaire.
+    protected_tables = enable_row_level_security(
+        db.session,
+        db.engine.dialect.name,
+    )
+    if protected_tables:
+        db.session.commit()
+        logger.info(
+            "RLS PostgreSQL activee sur %s tables publiques.",
+            len(protected_tables),
+        )
     depot_names = ["GERM DOSSEH", "SUPER DEPOT", "NBUKE RAMCO", "NADONIELLA A", "SAINT MARTIN", "YEHONAM"]
     for name in depot_names:
         if not Depot.query.filter_by(name=name).first():
