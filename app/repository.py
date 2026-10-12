@@ -152,14 +152,10 @@ def append_declaration(row):
         db.session.add(SaleLine(sale_id=sale.id, product_id=product.id, quantity=quantity, subtotal=subtotal))
 
     category = (row[12] or "").strip()
-    difficulty_exists = Difficulty.query.filter(
-        Difficulty.vendor_phone == vendor.phone,
-        Difficulty.reported_at >= day_start,
-        Difficulty.reported_at < day_end,
-        Difficulty.category == category,
-    ).first()
     difficulty = None
-    if category and category not in {"-", "Aucun probleme"} and not difficulty_exists:
+    # Each completed declaration can report a new occurrence, even on the same day.
+    if (sale.source != "WhatsApp - saisie en cours"
+            and category and category not in {"-", "Aucun probleme", "Aucun problème"}):
         difficulty = Difficulty(
             vendor_phone=vendor.phone,
             depot_id=depot.id,
@@ -183,18 +179,9 @@ def append_declaration(row):
             [user for user in recipients if user.role == "depositaire"],
             "vente", "Nouvelle vente Vendor-Bot", sale_message, "/depositaire/ventes",
         )
-        notify_users(
-            [user for user in recipients if user.role == "administrateur"],
-            "vente", "Nouvelle vente Vendor-Bot", sale_message, "/dashboard/donnees",
-        )
         if difficulty:
             difficulty_message = "{} — {} : {}".format(
                 vendor.name, category, difficulty.description or "Aucun détail"
-            )
-            notify_users(
-                [user for user in recipients if user.role == "depositaire"],
-                "difficulte", "Difficulté urgente signalée", difficulty_message,
-                "/depositaire/difficultes", priority="urgente",
             )
             notify_users(
                 [user for user in recipients if user.role == "administrateur"],

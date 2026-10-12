@@ -504,3 +504,27 @@ def test_all_admin_depot_filters_accept_an_empty_depot(client):
         f"/api/admin/stocks?depot_id={depot_id}",
     ]
     assert [client.get(path, headers=headers).status_code for path in paths] == [200] * len(paths)
+
+
+def test_admin_difficulties_include_older_months_unless_filtered(client):
+    from app.models import Difficulty
+
+    _seed_accounts()
+    vendor = db.session.get(Vendor, "22890000001")
+    for month in (6, 9):
+        db.session.add(Difficulty(
+            vendor_phone=vendor.phone, depot_id=vendor.depot_id,
+            category="Produit", description="Panne",
+            reported_at=datetime(2026, month, 14, 9, 0),
+        ))
+    db.session.commit()
+    headers = _login(client, "admin@test.tg", "secret123")
+    response = client.get("/api/admin/difficulties", headers=headers)
+    assert response.status_code == 200
+    assert len(response.get_json()) == 2
+    response = client.get(
+        "/api/admin/difficulties?date_from=2026-09-01&date_to=2026-09-30",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert len(response.get_json()) == 1
