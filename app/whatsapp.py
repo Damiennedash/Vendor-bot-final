@@ -46,7 +46,7 @@ def send_message(to, text):
 def send_template(to, template_name, body_parameters=None, language_code="fr"):
    """Envoie un modèle Meta approuvé, utilisable hors de la fenêtre de 24 h."""
    parameters = [
-       {"type": "text", "text": str(value)[:1024]}
+       {"type": "text", "text": " ".join(str(value).split())[:1024]}
        for value in (body_parameters or [])
    ]
    template = {
@@ -143,6 +143,8 @@ def _post(to, payload):
     if not normalized_to:
         logger.error("Numero WhatsApp destinataire invalide")
         return False
+    if len(normalized_to) == 8:
+        normalized_to = "228" + normalized_to
     payload["to"] = normalized_to
 
     try:

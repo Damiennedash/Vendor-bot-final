@@ -98,3 +98,24 @@ def test_difficulty_only_followup_preserves_sales_and_routes_notifications(recip
     append_declaration(row)
     assert Sale.query.count() == 1
     assert Notification.query.filter_by(kind="difficulte").count() == 1
+
+
+def test_retry_only_attempts_failed_channel(recipients, monkeypatch):
+    from app import whatsapp
+    append_declaration(declaration())
+    item = Notification.query.one()
+    item.recipient.phone = "70452612"
+    item.email_status = "envoye"
+    item.whatsapp_status = "echoue"
+    db.session.commit()
+    email = Mock(return_value=True)
+    wa = Mock(return_value=True)
+    monkeypatch.setattr(notifications, "send_notification_email", email)
+    monkeypatch.setattr(whatsapp, "send_notification", wa)
+    notifications.retry_notification(item.id)
+    email.assert_not_called()
+    wa.assert_called_once()
+    assert item.email_status == item.whatsapp_status == "envoye"
+    notifications.retry_notification(item.id)
+    email.assert_not_called()
+    wa.assert_called_once()
