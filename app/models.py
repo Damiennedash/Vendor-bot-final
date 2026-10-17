@@ -100,6 +100,7 @@ class Sale(db.Model):
     vendor_phone = db.Column(db.String(32), db.ForeignKey("vendors.phone"), nullable=False, index=True)
     depot_id = db.Column(db.Integer, db.ForeignKey("depots.id"), nullable=False, index=True)
     declared_at = db.Column(db.DateTime, nullable=False, default=utc_now, index=True)
+    sales_date = db.Column(db.Date, index=True)
     period = db.Column(db.String(16), nullable=False)
     amount = db.Column(db.BigInteger, nullable=False, default=0)
     location = db.Column(db.String(255), nullable=False, default="")

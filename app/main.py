@@ -97,6 +97,12 @@ def _database_provider():
 def init_db_command():
     """Cree les tables PostgreSQL et les donnees de reference."""
     db.create_all()
+    sale_columns = {column["name"] for column in inspect(db.engine).get_columns("sales")}
+    if "sales_date" not in sale_columns:
+        db.session.execute(text("ALTER TABLE sales ADD COLUMN sales_date DATE"))
+    db.session.execute(text("UPDATE sales SET sales_date = DATE(declared_at) WHERE sales_date IS NULL"))
+    db.session.execute(text("CREATE INDEX IF NOT EXISTS ix_sales_sales_date ON sales (sales_date)"))
+    db.session.commit()
     user_columns = {column["name"] for column in inspect(db.engine).get_columns("users")}
     if "mfa_secret" not in user_columns:
         db.session.execute(text("ALTER TABLE users ADD COLUMN mfa_secret VARCHAR(64)"))

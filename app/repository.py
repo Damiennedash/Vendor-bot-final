@@ -99,12 +99,11 @@ def update_vendor_sales(phone, montant, pieces, date, fanxtra="0", fanchoco="0",
     db.session.commit()
 
 
-def latest_daily_declaration(phone):
-    day_start = datetime.combine(datetime.now().date(), time.min)
+def latest_daily_declaration(phone, sales_date=None):
+    day_start = datetime.combine(sales_date or datetime.now().date(), time.min)
     return Sale.query.filter(
         Sale.vendor_phone == phone,
-        Sale.declared_at >= day_start,
-        Sale.declared_at < day_start + timedelta(days=1),
+        ((Sale.sales_date == day_start.date()) | (Sale.sales_date.is_(None) & (Sale.declared_at >= day_start) & (Sale.declared_at < day_start + timedelta(days=1)))),
         (Sale.source != "WhatsApp - saisie en cours") | (Sale.status == "rejetee"),
     ).order_by(Sale.declared_at.desc(), Sale.id.desc()).first()
 
@@ -148,6 +147,7 @@ def append_declaration(row):
     if row[15] == "WhatsApp - suivi difficultes":
         return append_difficulty_followup(row)
     declared_at = datetime.strptime("{} {}".format(row[0], row[1]), "%d/%m/%Y %H:%M")
+    sales_date = datetime.strptime(row[16], "%d/%m/%Y").date() if len(row) > 16 else declared_at.date()
     depot = get_or_create_depot(row[5])
     vendor = db.session.get(Vendor, row[3])
     if vendor is None:
@@ -171,8 +171,7 @@ def append_declaration(row):
         Sale.vendor_phone == vendor.phone,
         Sale.status == "en_attente",
         Sale.source == "WhatsApp - saisie en cours",
-        Sale.declared_at >= day_start,
-        Sale.declared_at < day_end,
+        Sale.sales_date == sales_date,
     ).order_by(Sale.id.desc()).first()
     if sale is None:
         sale = Sale(vendor_phone=vendor.phone, status="en_attente")
@@ -181,6 +180,7 @@ def append_declaration(row):
         for line in list(sale.lines):
             db.session.delete(line)
 
+    sale.sales_date = sales_date
     sale.declared_at = declared_at
     sale.period = row[2]
     sale.depot_id = depot.id
@@ -222,6 +222,7 @@ def append_declaration(row):
         sale_message = "{} ({}) a soumis une vente de {:,} FCFA le {}. Produits : {}.".format(
             vendor.name, vendor.phone, amount, declared_at.strftime("%d/%m/%Y à %H:%M"), details
         ).replace(",", " ")
+        sale_message += " Date de vente : {}.".format(sales_date.strftime("%d/%m/%Y"))
         notify_users(
             [user for user in recipients if user.role == "depositaire"],
             "vente", "Nouvelle vente Vendor-Bot", sale_message, "/depositaire/ventes",
@@ -247,8 +248,7 @@ def recover_missing_sales():
         day_end = day_start + timedelta(days=1)
         existing = Sale.query.filter(
             Sale.vendor_phone == vendor.phone,
-            Sale.declared_at >= day_start,
-            Sale.declared_at < day_end,
+            ((Sale.sales_date == vendor.last_sales_date) | (Sale.sales_date.is_(None) & (Sale.declared_at >= day_start) & (Sale.declared_at < day_end))),
         ).first()
         if existing:
             continue

@@ -67,7 +67,7 @@ def test_rejected_declaration_requires_fresh_figures_even_for_option_one(client)
     assert sale.status == "rejetee"
     assert Sale.query.order_by(Sale.id.desc()).first().amount == 15000
     reply, _ = handle_message(phone, "Bonjour")
-    assert "encore rencontre des difficultes" in reply
+    assert "Concernant vos ventes" in reply
 
 
 def test_next_day_reopens_sales_even_after_followup_started(client):
@@ -76,6 +76,7 @@ def test_next_day_reopens_sales_even_after_followup_started(client):
     handle_message(phone, "Bonjour")
     yesterday = datetime.now() - timedelta(days=1)
     sale.declared_at = yesterday
+    sale.sales_date = yesterday.date()
     session = db.session.get(BotSession, phone)
     session.data = {**session.data, "followup_date": yesterday.strftime("%d/%m/%Y")}
     db.session.commit()
@@ -90,3 +91,54 @@ def test_incomplete_draft_does_not_count_as_submitted(client):
     assert Sale.query.one().source == "WhatsApp - saisie en cours"
     reply, _ = handle_message(phone, "menu")
     assert "Concernant vos ventes" in reply
+
+
+@pytest.mark.parametrize("option", ["1", "3"])
+def test_yesterday_report_does_not_block_today(client, option):
+    phone = "22891112222"
+    for message in ("Bonjour", "Afi", "6", option, "20000", "2", "1", "0", "2", "7"):
+        _, row = handle_message(phone, message)
+        if row:
+            append_declaration(row)
+    yesterday_sale = Sale.query.one()
+    assert yesterday_sale.sales_date == (datetime.now() - timedelta(days=1)).date()
+    assert yesterday_sale.declared_at.date() == datetime.now().date()
+    reply, _ = handle_message(phone, "Bonjour")
+    assert "Concernant vos ventes" in reply
+    for message in ("2", "30000", "3", "1", "0", "2", "7"):
+        _, row = handle_message(phone, message)
+        if row:
+            append_declaration(row)
+    assert Sale.query.count() == 2
+    today_sale = Sale.query.order_by(Sale.id.desc()).first()
+    assert today_sale.sales_date == datetime.now().date()
+    assert today_sale.amount == 30000
+    assert yesterday_sale.amount == 20000
+    reply, _ = handle_message(phone, "Bonjour")
+    assert "encore rencontre des difficultes" in reply
+
+
+def test_repeating_yesterday_does_not_copy_sales(client):
+    phone = "22891112222"
+    for message in ("Bonjour", "Afi", "6", "1", "20000", "2", "1", "0", "2", "7"):
+        _, row = handle_message(phone, message)
+        if row:
+            append_declaration(row)
+    handle_message(phone, "Bonjour")
+    reply, _ = handle_message(phone, "1")
+    assert "Ventes deja enregistrees" in reply
+    _, row = handle_message(phone, "7")
+    append_declaration(row)
+    assert Sale.query.count() == 1
+
+
+def test_init_db_backfills_legacy_dates_idempotently(client):
+    from app.main import app
+    sale = complete_first("22891112222")
+    sale.sales_date = None
+    db.session.commit()
+    for _ in range(2):
+        result = app.test_cli_runner().invoke(args=["init-db"])
+        assert result.exit_code == 0, result.output
+    db.session.expire_all()
+    assert sale.sales_date == sale.declared_at.date()

@@ -300,6 +300,7 @@ def sale_data(sale):
         "vendor": vendor_data(sale.vendor),
         "depot": {"id": sale.depot.id, "name": sale.depot.name},
         "declared_at": iso(sale.declared_at),
+        "sales_date": (sale.sales_date or sale.declared_at.date()).isoformat(),
         "period": sale.period,
         "amount": sale.amount,
         "location": sale.location,

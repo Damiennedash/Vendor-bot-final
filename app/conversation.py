@@ -223,21 +223,20 @@ def _handle_inner(phone, body, session):
 
     # VENTE AUJOURD'HUI
     if step == "vente_aujourd_hui":
-        mem = load_vendor(phone) or {}
-        last_date = mem.get("last_date", "")
-        deja_declare = not data.get("correction") and last_date in [_today(), _yesterday()]
+        if body_raw in {"1", "2", "3"}:
+            data["sales_date"] = _today() if body_raw == "2" else _yesterday()
+            selected_date = datetime.strptime(data["sales_date"], "%d/%m/%Y").date()
+            previous = latest_daily_declaration(phone, selected_date)
+            if previous and previous.status != "rejetee":
+                data["difficulty_only"] = True
+                data["followup_date"] = _today()
+                session["step"] = "probleme"
+                return "Ventes deja enregistrees pour cette date.\n\n" + _menu_probleme(True), None
 
         if body_raw == "1":
             # Je vais vendre → reporter ventes d'hier si deja declarees
             data["vente_aujourd_hui"] = "Je vais vendre"
             data["lieu_vente"] = "-"
-            if deja_declare:
-                data["ventes_montant"] = mem.get("last_montant", "0")
-                data["fanxtra"] = mem.get("last_fanxtra", "0")
-                data["fanchoco"] = mem.get("last_fanchoco", "0")
-                data["fanvanille"] = mem.get("last_fanvanille", "0")
-                session["step"] = "probleme"
-                return "Ventes deja enregistrees \u2705\n\n" + _menu_probleme(), None
             data["periode_ventes"] = "hier"
             session["step"] = "ventes_montant"
             return "Combien avez-vous vendu *hier* en FCFA ?\n_(Ex : 45000)_", None
@@ -300,7 +299,7 @@ def _handle_inner(phone, body, session):
             phone,
             data.get("ventes_montant", "0"),
             total,
-            _today(),
+            data.get("sales_date", _today()),
             data.get("fanxtra", "0"),
             data.get("fanchoco", "0"),
             body_raw
@@ -410,4 +409,5 @@ def _build_row(phone, data, commentaire, source="WhatsApp"):
         data.get("prime", ""),
         commentaire,
         source,
+        data.get("sales_date", _yesterday() if data.get("periode_ventes") == "hier" else _today()),
     ]
