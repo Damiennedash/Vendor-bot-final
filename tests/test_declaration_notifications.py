@@ -76,3 +76,25 @@ def test_draft_does_not_notify_or_create_difficulty(recipients):
     append_declaration(row)
     assert Difficulty.query.count() == 1
     assert Notification.query.count() == 2
+
+
+def test_difficulty_only_followup_preserves_sales_and_routes_notifications(recipients):
+    from app.models import Sale
+
+    append_declaration(declaration())
+    row = declaration("Produit", "Panne supplementaire", "15:30")
+    row[15] = "WhatsApp - suivi difficultes"
+    append_declaration(row)
+    assert Sale.query.count() == 1
+    assert Sale.query.one().amount == 20000
+    assert Difficulty.query.one().description == "Panne supplementaire"
+    assert [(n.recipient.email, n.kind) for n in Notification.query.order_by(Notification.id)] == [
+        ("depot@test.tg", "vente"),
+        ("depot@test.tg", "information"),
+        ("admin@test.tg", "difficulte"),
+    ]
+    row[12] = "Aucun probleme"
+    row[14] = ""
+    append_declaration(row)
+    assert Sale.query.count() == 1
+    assert Notification.query.filter_by(kind="difficulte").count() == 1

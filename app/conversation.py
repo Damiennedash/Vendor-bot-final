@@ -4,6 +4,7 @@ from .repository import (
     append_declaration,
     load_bot_session,
     load_vendor,
+    latest_daily_declaration,
     save_bot_session,
     save_vendor,
     update_vendor_sales,
@@ -116,8 +117,10 @@ def _question_vente():
     return "\n".join(lines)
 
 
-def _menu_probleme():
+def _menu_probleme(followup=False):
     intro = "Avez-vous un probleme pour atteindre vos objectifs *aujourd hui* ?"
+    if followup:
+        intro = "Avez-vous encore rencontre des difficultes *aujourd hui* ?"
     lines = [
         intro, "",
         "1 - J ai un probleme produit",
@@ -162,6 +165,10 @@ def _handle_inner(phone, body, session):
     step = session["step"]
     data = session["data"]
 
+    if data.get("followup_date") and data["followup_date"] != _today():
+        _reset_state(session)
+        step, data = session["step"], session["data"]
+
     if body_low == "menu":
         _reset_state(session)
         step = session["step"]
@@ -175,6 +182,15 @@ def _handle_inner(phone, body, session):
             depot = mem["depot"]
             data["nom"] = nom
             data["depot"] = depot
+            previous = latest_daily_declaration(phone)
+            if previous and previous.status != "rejetee":
+                data["difficulty_only"] = True
+                data["followup_date"] = _today()
+                session["step"] = "probleme"
+                return (_salutation() + " Champion *" + nom + "* !\n\n"
+                        "Vos ventes du jour sont deja enregistrees.\n\n"
+                        + _menu_probleme(True)), None
+            data["correction"] = bool(previous and previous.status == "rejetee")
             session["step"] = "vente_aujourd_hui"
             return (
                 _salutation() + " Champion *" + nom + "* ! \U0001f3c6\n\n"
@@ -209,7 +225,7 @@ def _handle_inner(phone, body, session):
     if step == "vente_aujourd_hui":
         mem = load_vendor(phone) or {}
         last_date = mem.get("last_date", "")
-        deja_declare = last_date in [_today(), _yesterday()]
+        deja_declare = not data.get("correction") and last_date in [_today(), _yesterday()]
 
         if body_raw == "1":
             # Je vais vendre → reporter ventes d'hier si deja declarees
@@ -332,7 +348,7 @@ def _handle_inner(phone, body, session):
     # PROBLEME
     if step == "probleme":
         if body_raw not in ISSUE_MAP:
-            return _menu_probleme(), None
+            return _menu_probleme(data.get("difficulty_only", False)), None
         categorie, prime = ISSUE_MAP[body_raw]
         data["categorie"] = categorie
         data["prime"] = prime
@@ -367,26 +383,14 @@ def _handle_inner(phone, body, session):
             + _au_revoir(nom)
         ), row
 
-    # FALLBACK
+    # Re-enter through the same daily-declaration checks after an invalid state.
     _reset_state(session)
-    mem = load_vendor(phone)
-    if mem:
-        session["step"] = "vente_aujourd_hui"
-        session["data"]["nom"] = mem["nom"]
-        session["data"]["depot"] = mem["depot"]
-        return (
-            _salutation() + " Champion *" + mem["nom"] + "* ! \U0001f3c6\n\n"
-            "Depot : *" + mem["depot"] + "*\n\n"
-            + _question_vente()
-        ), None
-    session["step"] = "nom"
-    return (
-        _salutation() + " Champion ! Bienvenue sur *" + BRAND + "* Vendor Support. \U0001f3c6\n\n"
-        "Veuillez entrer votre *nom*."
-    ), None
+    return _handle_inner(phone, body, session)
 
 
 def _build_row(phone, data, commentaire, source="WhatsApp"):
+    if data.get("difficulty_only"):
+        source = "WhatsApp - suivi difficultes"
     now = datetime.now()
     periode = "Matin" if now.hour < 13 else "Soir"
     return [

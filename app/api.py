@@ -632,7 +632,15 @@ def review_sale(sale_id):
                  "Vente {} par {}".format(sale.id, sale.vendor.name), before,
                  {"status": sale.status, "rejection_reason": sale.rejection_reason})
     db.session.commit()
-    message = "Votre vente a ete validee." if action == "validate" else "Votre vente a ete rejetee. Motif : " + reason
+    if action == "reject":
+        from .repository import latest_daily_declaration, save_bot_session
+        latest = latest_daily_declaration(sale.vendor_phone)
+        if latest and latest.id == sale.id:
+            save_bot_session(sale.vendor_phone, {"step": "start", "data": {}})
+    message = "Votre vente a ete validee." if action == "validate" else (
+        "Votre vente a ete rejetee. Motif : " + reason
+        + "\nEnvoyez Bonjour pour reprendre votre declaration depuis le debut."
+    )
     from .whatsapp import send_message
     send_message(sale.vendor_phone, message)
     return jsonify(sale_data(sale))

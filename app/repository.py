@@ -99,7 +99,54 @@ def update_vendor_sales(phone, montant, pieces, date, fanxtra="0", fanchoco="0",
     db.session.commit()
 
 
+def latest_daily_declaration(phone):
+    day_start = datetime.combine(datetime.now().date(), time.min)
+    return Sale.query.filter(
+        Sale.vendor_phone == phone,
+        Sale.declared_at >= day_start,
+        Sale.declared_at < day_start + timedelta(days=1),
+        (Sale.source != "WhatsApp - saisie en cours") | (Sale.status == "rejetee"),
+    ).order_by(Sale.declared_at.desc(), Sale.id.desc()).first()
+
+
+def append_difficulty_followup(row):
+    """Record a follow-up without creating another sale or changing its figures."""
+    from .notifications import notify_users, recipients_for_depot
+    vendor = db.session.get(Vendor, row[3])
+    if vendor is None:
+        raise ValueError("Revendeur inconnu")
+    category = (row[12] or "").strip()
+    difficulty = None
+    if category and category not in {"-", "Aucun probleme", "Aucun problème"}:
+        difficulty = Difficulty(
+            vendor_phone=vendor.phone, depot_id=vendor.depot_id,
+            category=category, prime_pillar=row[13] or "",
+            description=row[14] or "",
+            reported_at=datetime.strptime(row[0] + " " + row[1], "%d/%m/%Y %H:%M"),
+        )
+        db.session.add(difficulty)
+        db.session.commit()
+    recipients = recipients_for_depot(vendor.depot_id)
+    notify_users(
+        [user for user in recipients if user.role == "depositaire"],
+        "information", "Nouveau suivi Vendor-Bot",
+        "{} ({}) a soumis un suivi : {}. {}".format(
+            vendor.name, vendor.phone, category, row[14] or ""),
+        "/depositaire/difficultes",
+    )
+    if difficulty:
+        notify_users(
+            [user for user in recipients if user.role == "administrateur"],
+            "difficulte", "Difficulté urgente signalée",
+            "{} — {} : {}".format(vendor.name, category, difficulty.description or "Aucun détail"),
+            "/dashboard/difficultes", priority="urgente",
+        )
+    return difficulty.id if difficulty else None
+
+
 def append_declaration(row):
+    if row[15] == "WhatsApp - suivi difficultes":
+        return append_difficulty_followup(row)
     declared_at = datetime.strptime("{} {}".format(row[0], row[1]), "%d/%m/%Y %H:%M")
     depot = get_or_create_depot(row[5])
     vendor = db.session.get(Vendor, row[3])

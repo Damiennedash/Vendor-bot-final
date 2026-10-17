@@ -528,3 +528,25 @@ def test_admin_difficulties_include_older_months_unless_filtered(client):
     )
     assert response.status_code == 200
     assert len(response.get_json()) == 1
+
+
+def test_rejection_resets_active_followup_and_reopens_sales(client, monkeypatch):
+    from app.conversation import handle_message
+    from app.models import BotSession
+    from app.repository import save_bot_session
+    from app import whatsapp
+
+    monkeypatch.setattr(whatsapp, "send_message", lambda *args: True)
+    own_id, _ = _seed_accounts()
+    sale = db.session.get(Sale, own_id)
+    phone = sale.vendor_phone
+    save_bot_session(phone, {"step": "commentaire", "data": {"difficulty_only": True}})
+    headers = _login(client, "depot@test.tg", "secret123")
+    response = client.patch(
+        f"/api/depositaire/sales/{own_id}", headers=headers,
+        json={"action": "reject", "reason": "Montant incorrect"},
+    )
+    assert response.status_code == 200
+    assert db.session.get(BotSession, phone).step == "start"
+    reply, _ = handle_message(phone, "Bonjour")
+    assert "Concernant vos ventes" in reply
