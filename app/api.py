@@ -21,6 +21,21 @@ from .models import AuditLog, Bonus, Depot, Difficulty, MfaRecoveryCode, Notific
 from .notifications import retry_notification
 
 
+from .permissions import (PRIMARY_ADMIN_EMAIL, PERMISSION_MODULES, EDITABLE, ALL_PERMISSIONS,
+                          is_primary_admin, effective_permissions, has_permission, notification_visible)
+
+# Explicit endpoint map: new administrator endpoints are denied until classified.
+ADMIN_ENDPOINT_MODULES = {
+    "admin_summary": "pilotage", "list_users": "comptes", "create_user": "comptes",
+    "update_user": "comptes", "reset_user_mfa": "comptes", "list_vendors": "revendeurs",
+    "admin_performances": "performances", "admin_bonuses": "performances",
+    "admin_product_totals": "donnees", "admin_product_breakdown": "donnees",
+    "admin_difficulties": "difficultes", "update_difficulty": "difficultes",
+    "admin_sales": "donnees", "admin_stocks": "donnees", "admin_analytics": "analyses",
+    "admin_targets": "analyses", "admin_audit": "audit", "admin_notifications": "notifications",
+    "retry_admin_notification": "notifications", "system_status": "systeme",
+}
+
 api = Blueprint("api", __name__, url_prefix="/api")
 logger = logging.getLogger(__name__)
 
@@ -30,11 +45,25 @@ def role_required(*roles):
         @wraps(fn)
         @jwt_required()
         def wrapped(*args, **kwargs):
-            if get_jwt().get("scope") != "authenticated" or get_jwt().get("role") not in roles:
+            if get_jwt().get("scope") != "authenticated":
                 return jsonify({"error": "Acces interdit"}), 403
             user = current_user()
             if not user or not user.active:
                 return jsonify({"error": "Compte suspendu"}), 401
+            if user.role not in roles:
+                return jsonify({"error": "Acces interdit"}), 403
+            if user.role == "administrateur" and request.path.startswith("/api/admin/"):
+                if fn.__name__ in {"permission_catalog", "update_admin_permissions"}:
+                    if not is_primary_admin(user):
+                        return jsonify({"error": "Réservé à l’administratrice principale"}), 403
+                elif fn.__name__ == "list_depots":
+                    if not effective_permissions(user):
+                        return jsonify({"error": "Accès non autorisé"}), 403
+                else:
+                    module = ADMIN_ENDPOINT_MODULES.get(fn.__name__)
+                    action = "view" if request.method in {"GET", "HEAD"} else "edit"
+                    if not module or not has_permission(user, f"{module}.{action}"):
+                        return jsonify({"error": "Vous n’avez pas l’autorisation pour cette fonctionnalité"}), 403
             return fn(*args, **kwargs)
         return wrapped
     return decorator
@@ -61,6 +90,8 @@ def user_data(user):
         "role": user.role,
         "active": user.active,
         "mfa_enabled": user.mfa_enabled,
+        "is_primary_admin": is_primary_admin(user),
+        "permissions": effective_permissions(user),
         "depot": {"id": user.depot.id, "name": user.depot.name} if user.depot else None,
     }
 
@@ -518,7 +549,7 @@ def me():
     if not user or not user.active:
         return jsonify({"error": "Compte inactif"}), 401
     return jsonify({
-        "id": user.id, "name": user.name, "email": user.email, "phone": user.phone, "role": user.role,
+        **user_data(user),
         "depot": {"id": user.depot.id, "name": user.depot.name, "location": user.depot.location} if user.depot else None,
         "mfa_enabled": user.mfa_enabled,
     })
@@ -539,6 +570,8 @@ def update_me():
     phone = str(payload.get("phone", user.phone or "")).strip() or None
     password = str(payload.get("password", ""))
 
+    if email != user.email.strip().lower() and (is_primary_admin(user) or email == PRIMARY_ADMIN_EMAIL):
+        return jsonify({"error": "L’adresse du compte principal est protégée"}), 403
     if not name or not email:
         return jsonify({"error": "Le nom et l'adresse electronique sont obligatoires"}), 400
     duplicate = User.query.filter(func.lower(User.email) == email, User.id != user.id).first()
@@ -566,10 +599,12 @@ def update_me():
 def list_notifications():
     if get_jwt().get("scope") != "authenticated":
         return jsonify({"error": "Double authentification requise"}), 403
+    if not current_user() or not current_user().active:
+        return jsonify({"error": "Compte inactif"}), 401
     rows = Notification.query.filter_by(recipient_user_id=current_user().id).order_by(
         Notification.created_at.desc()
     ).limit(50).all()
-    return jsonify([notification_data(item) for item in rows])
+    return jsonify([notification_data(item) for item in rows if notification_visible(current_user(), item)])
 
 
 @api.patch("/notifications/<int:item_id>")
@@ -580,6 +615,8 @@ def read_notification(item_id):
     item = Notification.query.filter_by(
         id=item_id, recipient_user_id=current_user().id
     ).first_or_404()
+    if not notification_visible(current_user(), item):
+        return jsonify({"error": "Accès interdit"}), 403
     item.read_at = utc_now()
     db.session.commit()
     return jsonify({"id": item.id, "read": True})
@@ -823,6 +860,10 @@ def list_vendors():
 def create_user():
     payload = request.get_json(silent=True) or {}
     role = payload.get("role")
+    if role == "administrateur" and not is_primary_admin(current_user()):
+        return jsonify({"error": "Seul le compte principal peut créer un administrateur"}), 403
+    if str(payload.get("email", "")).strip().lower() == PRIMARY_ADMIN_EMAIL:
+        return jsonify({"error": "Cette adresse est réservée au compte principal"}), 403
     depot_id = payload.get("depot_id")
     phone = str(payload.get("phone", "")).strip() or None
     if role not in {"administrateur", "depositaire", "revendeur"}:
@@ -842,6 +883,7 @@ def create_user():
         email=str(payload["email"]).lower(),
         phone=phone,
         role=role,
+        admin_permissions=[] if role == "administrateur" else None,
         depot_id=depot_id,
     )
     user.set_password(payload["password"])
@@ -878,6 +920,12 @@ def update_user(user_id):
     phone = str(payload.get("phone", user.phone or "")).strip() or None
     active = bool(payload.get("active", user.active))
 
+    if (user.role == "administrateur" or role == "administrateur") and not is_primary_admin(current_user()):
+        return jsonify({"error": "Seul le compte principal peut modifier un administrateur"}), 403
+    if is_primary_admin(user) and (email != PRIMARY_ADMIN_EMAIL or role != "administrateur" or not active):
+        return jsonify({"error": "Le compte principal doit conserver son identité et son accès"}), 403
+    if not is_primary_admin(user) and email == PRIMARY_ADMIN_EMAIL:
+        return jsonify({"error": "Cette adresse est réservée au compte principal"}), 403
     if role not in {"administrateur", "depositaire", "revendeur"}:
         return jsonify({"error": "Role invalide"}), 400
     if not name or not email:
@@ -896,6 +944,8 @@ def update_user(user_id):
     before = user_data(user)
     user.name = name
     user.email = email
+    if user.role != "administrateur" and role == "administrateur":
+        user.admin_permissions = []
     user.role = role
     user.depot_id = None if role == "administrateur" else depot_id
     user.phone = phone
@@ -1088,6 +1138,8 @@ def list_depots():
 def reset_user_mfa(user_id):
     actor = current_user()
     user = db.session.get(User, user_id) or User.query.filter_by(id=user_id).first_or_404()
+    if user.role == "administrateur" and not is_primary_admin(actor):
+        return jsonify({"error": "Seul le compte principal peut réinitialiser un administrateur"}), 403
     before = {"mfa_enabled": user.mfa_enabled}
     user.mfa_secret = None
     user.mfa_enabled = False
@@ -1258,3 +1310,35 @@ def admin_analytics():
         "depot_ranking": [{"id": row_id, "name": name, "amount": int(amount or 0), "sales": int(count)} for row_id, name, amount, count in depot_query.all()],
         "product_targets": _target_rows(period, depot_id),
     })
+
+
+@api.get("/admin/permissions")
+@role_required("administrateur")
+def permission_catalog():
+    return jsonify([{"key": key, "label": label, "editable": key in EDITABLE}
+                    for key, label in PERMISSION_MODULES.items()])
+
+
+@api.put("/admin/users/<int:user_id>/permissions")
+@role_required("administrateur")
+def update_admin_permissions(user_id):
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"error": "Compte introuvable"}), 404
+    if user.role != "administrateur" or is_primary_admin(user):
+        return jsonify({"error": "Les droits du compte principal ne peuvent pas être restreints"}), 400
+    permissions = (request.get_json(silent=True) or {}).get("permissions")
+    if not isinstance(permissions, list) or any(not isinstance(p, str) or p not in ALL_PERMISSIONS for p in permissions):
+        return jsonify({"error": "Liste de permissions invalide"}), 400
+    normalized = set(permissions)
+    for permission in permissions:
+        if permission.endswith(".edit"):
+            normalized.add(permission.removesuffix(".edit") + ".view")
+    if any(p.split(".")[0] in {"audit", "notifications", "systeme"} for p in normalized):
+        normalized.add("analyses.view")
+    before = user_data(user)
+    user.admin_permissions = sorted(normalized)
+    record_audit(current_user(), "permissions", "utilisateur", user.id,
+                 "Modification des droits de {}".format(user.name), before, user_data(user))
+    db.session.commit()
+    return jsonify(user_data(user))

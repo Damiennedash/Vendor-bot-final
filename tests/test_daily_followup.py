@@ -142,3 +142,36 @@ def test_init_db_backfills_legacy_dates_idempotently(client):
         assert result.exit_code == 0, result.output
     db.session.expire_all()
     assert sale.sales_date == sale.declared_at.date()
+
+
+def test_previous_evening_sales_skip_figures_next_morning(client):
+    phone = "22891112222"
+    sale = complete_first(phone)
+    yesterday = datetime.now() - timedelta(days=1)
+    sale.declared_at = yesterday
+    sale.sales_date = yesterday.date()
+    db.session.commit()
+    reply, _ = handle_message(phone, "Bonjour")
+    assert "Concernant vos ventes" in reply
+    reply, _ = handle_message(phone, "1")
+    assert "encore rencontre des difficultes" in reply
+    assert "Combien" not in reply
+    _, row = handle_message(phone, "7")
+    append_declaration(row)
+    assert Sale.query.count() == 1
+    handle_message(phone, "Bonjour")
+    reply, _ = handle_message(phone, "2")
+    assert "Combien avez-vous vendu" in reply
+
+
+def test_evening_greeting_reopens_after_unfinished_yesterday_followup(client):
+    phone = "22891112222"
+    sale = complete_first(phone)
+    sale.sales_date = (datetime.now() - timedelta(days=1)).date()
+    db.session.commit()
+    handle_message(phone, "Bonjour")
+    handle_message(phone, "1")
+    reply, _ = handle_message(phone, "Bonsoir")
+    assert "Concernant vos ventes" in reply
+    reply, _ = handle_message(phone, "2")
+    assert "Combien avez-vous vendu" in reply

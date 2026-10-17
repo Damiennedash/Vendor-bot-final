@@ -27,6 +27,7 @@ class User(db.Model):
     phone = db.Column(db.String(32), unique=True)
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(32), nullable=False)
+    admin_permissions = db.Column(db.JSON)
     depot_id = db.Column(db.Integer, db.ForeignKey("depots.id"), index=True)
     active = db.Column(db.Boolean, nullable=False, default=True)
     mfa_secret = db.Column(db.String(64))

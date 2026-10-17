@@ -169,7 +169,7 @@ def _handle_inner(phone, body, session):
         _reset_state(session)
         step, data = session["step"], session["data"]
 
-    if body_low == "menu":
+    if body_low == "menu" or (data.get("difficulty_only") and body_low in {"bonjour", "bonsoir", "salut"}):
         _reset_state(session)
         step = session["step"]
         data = session["data"]

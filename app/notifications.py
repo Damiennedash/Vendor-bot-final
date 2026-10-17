@@ -7,6 +7,7 @@ from flask import current_app
 from .email_service import email_is_configured, send_notification_email
 from .extensions import db
 from .models import Notification, User, utc_now
+from .permissions import notification_visible
 
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,8 @@ def _deliver(notification_id):
     if not notification:
         return
     user = notification.recipient
+    if not notification_visible(user, notification):
+        return
     errors = []
     email_ok = notification.email_status == "envoye"
     whatsapp_ok = notification.whatsapp_status in {"envoye", "ignore"}
@@ -84,6 +87,8 @@ def notify_users(users, kind, title, message, link="", priority="normale"):
             priority=priority,
             link=link,
         )
+        if not notification_visible(user, row):
+            continue
         db.session.add(row)
         rows.append(row)
     db.session.commit()

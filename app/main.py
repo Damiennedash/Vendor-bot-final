@@ -104,6 +104,8 @@ def init_db_command():
     db.session.execute(text("CREATE INDEX IF NOT EXISTS ix_sales_sales_date ON sales (sales_date)"))
     db.session.commit()
     user_columns = {column["name"] for column in inspect(db.engine).get_columns("users")}
+    if "admin_permissions" not in user_columns:
+        db.session.execute(text("ALTER TABLE users ADD COLUMN admin_permissions JSON"))
     if "mfa_secret" not in user_columns:
         db.session.execute(text("ALTER TABLE users ADD COLUMN mfa_secret VARCHAR(64)"))
     if "mfa_enabled" not in user_columns:
