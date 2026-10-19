@@ -12,6 +12,7 @@ import qrcode
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import create_access_token, get_jwt, get_jwt_identity, jwt_required
 from sqlalchemy import func
+from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
 from .extensions import db
@@ -662,7 +663,7 @@ def depositaire_summary():
 @api.get("/depositaire/sales")
 @role_required("depositaire")
 def depositaire_sales():
-    query = Sale.query.filter_by(depot_id=current_user().depot_id)
+    query = Sale.query.options(joinedload(Sale.vendor), joinedload(Sale.depot), selectinload(Sale.lines).joinedload(SaleLine.product)).filter_by(depot_id=current_user().depot_id)
     if request.args.get("status"):
         query = query.filter_by(status=request.args["status"])
     query = apply_date_filters(query, Sale.declared_at)
@@ -703,15 +704,15 @@ def review_sale(sale_id):
         "Votre vente a ete rejetee. Motif : " + reason
         + "\nEnvoyez Bonjour pour reprendre votre declaration depuis le debut."
     )
-    from .whatsapp import send_message
-    send_message(sale.vendor_phone, message)
+    from .notifications import queue_sale_message
+    queue_sale_message(sale.vendor_phone, message)
     return jsonify(sale_data(sale))
 
 
 @api.get("/depositaire/stocks")
 @role_required("depositaire")
 def depositaire_stocks():
-    query = Sale.query.filter_by(depot_id=current_user().depot_id)
+    query = Sale.query.options(joinedload(Sale.vendor), joinedload(Sale.depot), selectinload(Sale.lines).joinedload(SaleLine.product)).filter_by(depot_id=current_user().depot_id)
     status = request.args.get("status")
     if status:
         query = query.filter_by(status={"valide": "validee", "rejete": "rejetee"}.get(status, status))
@@ -1071,7 +1072,7 @@ def admin_bonuses():
 @api.get("/admin/difficulties")
 @role_required("administrateur")
 def admin_difficulties():
-    query = Difficulty.query
+    query = Difficulty.query.options(joinedload(Difficulty.vendor), joinedload(Difficulty.depot), joinedload(Difficulty.assigned_admin))
     depot_id = requested_depot_id()
     if depot_id == -1:
         return jsonify({"error": "Dépôt invalide"}), 400
@@ -1129,7 +1130,10 @@ def difficulty_assignees():
 @api.get("/admin/sales")
 @role_required("administrateur")
 def admin_sales():
-    query = Sale.query
+    query = Sale.query.options(joinedload(Sale.vendor), joinedload(Sale.depot), selectinload(Sale.lines).joinedload(SaleLine.product))
+    vendor_phone = request.args.get("vendor_phone")
+    if vendor_phone:
+        query = query.filter_by(vendor_phone=vendor_phone)
     depot_id = requested_depot_id()
     if depot_id == -1:
         return jsonify({"error": "Dépôt invalide"}), 400
@@ -1144,7 +1148,7 @@ def admin_sales():
 @api.get("/admin/stocks")
 @role_required("administrateur")
 def admin_stocks():
-    query = Sale.query
+    query = Sale.query.options(joinedload(Sale.vendor), joinedload(Sale.depot), selectinload(Sale.lines).joinedload(SaleLine.product))
     depot_id = requested_depot_id()
     if depot_id == -1:
         return jsonify({"error": "Dépôt invalide"}), 400

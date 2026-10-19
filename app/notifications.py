@@ -103,3 +103,15 @@ def notify_users(users, kind, title, message, link="", priority="normale"):
 
     for row in rows:
         executor.submit(dispatch, row.id)
+
+
+def queue_sale_message(phone, message):
+    """Send the review receipt without blocking the confirmed sale response."""
+    def dispatch():
+        try:
+            from .whatsapp import send_message
+            if not send_message(phone, message):
+                logger.error("Sale review WhatsApp delivery failed")
+        except Exception:
+            logger.exception("Sale review WhatsApp delivery failed")
+    executor.submit(dispatch)
