@@ -30,7 +30,7 @@ ADMIN_ENDPOINT_MODULES = {
     "update_user": "comptes", "reset_user_mfa": "comptes", "list_vendors": "revendeurs",
     "admin_performances": "performances", "admin_bonuses": "performances",
     "admin_product_totals": "donnees", "admin_product_breakdown": "donnees",
-    "admin_difficulties": "difficultes", "update_difficulty": "difficultes",
+    "difficulty_assignees": "difficultes", "admin_difficulties": "difficultes", "update_difficulty": "difficultes",
     "admin_sales": "donnees", "admin_stocks": "donnees", "admin_analytics": "analyses",
     "admin_targets": "analyses", "admin_audit": "audit", "admin_notifications": "notifications",
     "retry_admin_notification": "notifications", "system_status": "systeme",
@@ -380,6 +380,8 @@ def difficulty_data(item):
         "description": item.description,
         "reported_at": iso(item.reported_at),
         "state": item.state,
+        "action_plan": item.action_plan,
+        "assigned_admin": {"id": item.assigned_admin.id, "name": item.assigned_admin.name} if item.assigned_admin else None,
     }
 
 
@@ -1084,17 +1086,44 @@ def admin_difficulties():
 @api.patch("/admin/difficulties/<int:item_id>")
 @role_required("administrateur")
 def update_difficulty(item_id):
-    item = db.session.get(Difficulty, item_id) or Difficulty.query.filter_by(id=item_id).first_or_404()
-    state = (request.get_json(silent=True) or {}).get("state")
+    item = Difficulty.query.filter_by(id=item_id).first_or_404()
+    payload = request.get_json(silent=True) or {}
+    state = payload.get("state", item.state)
     allowed = {"ouverte": "en_cours", "en_cours": "resolue"}
-    if allowed.get(item.state) != state:
-        return jsonify({"error": "Transition d'etat invalide"}), 400
-    before = {"state": item.state}
-    item.state = state
-    record_audit(current_user(), "changement_statut", "difficulte", item.id,
-                 "Difficulté {} passée à {}".format(item.id, state), before, {"state": state})
+    if state != item.state and allowed.get(item.state) != state:
+        return jsonify({"error": "Transition d'état invalide"}), 400
+    plan = payload.get("action_plan", item.action_plan)
+    if not isinstance(plan, str) or len(plan) > 5000:
+        return jsonify({"error": "Les actions doivent contenir au maximum 5000 caractères."}), 400
+    assignee_id = payload.get("assigned_admin_id", item.assigned_admin_id)
+    assignee = None
+    if assignee_id is not None:
+        if type(assignee_id) is not int:
+            return jsonify({"error": "Administrateur invalide"}), 400
+        assignee = db.session.get(User, assignee_id)
+        if not assignee or not assignee.active or not has_permission(assignee, "difficultes.view"):
+            return jsonify({"error": "Choisissez un administrateur actif autorisé à consulter les difficultés."}), 400
+    before = {"state": item.state, "action_plan": item.action_plan, "assigned_admin_id": item.assigned_admin_id}
+    changed_assignee = assignee_id != item.assigned_admin_id
+    item.state, item.action_plan, item.assigned_admin_id = state, plan.strip(), assignee_id
+    if changed_assignee and assignee:
+        db.session.add(Notification(recipient_user_id=assignee.id, kind="difficulte",
+            title="Une difficulté vous a été attribuée",
+            message=f"{current_user().name} vous confie le suivi de {item.vendor.name} : {item.category}. Actions : {item.action_plan or 'À définir'}",
+            link=f"/dashboard/difficultes#difficulty-{item.id}",
+            email_status="ignore", whatsapp_status="ignore"))
+    record_audit(current_user(), "suivi_difficulte", "difficulte", item.id,
+        f"Suivi de la difficulté {item.id}", before,
+        {"state": state, "action_plan": item.action_plan, "assigned_admin_id": assignee_id})
     db.session.commit()
     return jsonify(difficulty_data(item))
+
+
+@api.get("/admin/difficulty-assignees")
+@role_required("administrateur")
+def difficulty_assignees():
+    users = User.query.filter_by(role="administrateur", active=True).order_by(User.name).all()
+    return jsonify([{"id": user.id, "name": user.name} for user in users if has_permission(user, "difficultes.view")])
 
 
 @api.get("/admin/sales")

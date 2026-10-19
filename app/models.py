@@ -155,6 +155,9 @@ class Difficulty(db.Model):
     reported_at = db.Column(db.DateTime, nullable=False, default=utc_now)
     state = db.Column(db.String(24), nullable=False, default="ouverte", index=True)
     updated_at = db.Column(db.DateTime, nullable=False, default=utc_now, onupdate=utc_now)
+    action_plan = db.Column(db.Text, nullable=False, default="")
+    assigned_admin_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    assigned_admin = db.relationship("User", foreign_keys=[assigned_admin_id])
     vendor = db.relationship("Vendor")
     depot = db.relationship("Depot")
 

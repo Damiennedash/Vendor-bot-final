@@ -97,6 +97,12 @@ def _database_provider():
 def init_db_command():
     """Cree les tables PostgreSQL et les donnees de reference."""
     db.create_all()
+    difficulty_columns = {column["name"] for column in inspect(db.engine).get_columns("difficulties")}
+    if "action_plan" not in difficulty_columns:
+        db.session.execute(text("ALTER TABLE difficulties ADD COLUMN action_plan TEXT NOT NULL DEFAULT ''"))
+    if "assigned_admin_id" not in difficulty_columns:
+        db.session.execute(text("ALTER TABLE difficulties ADD COLUMN assigned_admin_id INTEGER REFERENCES users(id)"))
+    db.session.commit()
     sale_columns = {column["name"] for column in inspect(db.engine).get_columns("sales")}
     if "sales_date" not in sale_columns:
         db.session.execute(text("ALTER TABLE sales ADD COLUMN sales_date DATE"))
