@@ -252,3 +252,13 @@ class AuditLog(db.Model):
     after_data = db.Column(db.JSON)
     created_at = db.Column(db.DateTime, nullable=False, default=utc_now, index=True)
     actor = db.relationship("User")
+
+
+class BrowserSession(db.Model):
+    __tablename__ = "browser_sessions"
+    id = db.Column(db.Integer, primary_key=True)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    credential_hash = db.Column(db.String(64), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    user = db.relationship("User")

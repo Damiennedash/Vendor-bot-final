@@ -26,7 +26,7 @@ def test_rls_is_enabled_for_every_public_api_table():
 
     assert protected == PUBLIC_API_TABLES
     assert session.statements[0] == "SELECT current_user"
-    assert len(session.statements) == 1 + (17 * 3)
+    assert len(session.statements) == 1 + (len(PUBLIC_API_TABLES) * 3)
     for index, table_name in enumerate(PUBLIC_API_TABLES):
         offset = 1 + (index * 3)
         assert session.statements[offset] == (

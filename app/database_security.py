@@ -8,6 +8,7 @@ PUBLIC_API_TABLES = (
     "audit_logs",
     "bonuses",
     "bot_sessions",
+    "browser_sessions",
     "depots",
     "difficulties",
     "mfa_recovery_codes",

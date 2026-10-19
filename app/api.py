@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from .extensions import db
 from .email_service import email_is_configured, send_password_reset_email
 from .audit import record_audit
-from .models import AuditLog, Bonus, Depot, Difficulty, MfaRecoveryCode, Notification, PasswordResetToken, Performance, Product, ProductTarget, Sale, SaleLine, Stock, User, Vendor, utc_now
+from .models import BrowserSession, AuditLog, Bonus, Depot, Difficulty, MfaRecoveryCode, Notification, PasswordResetToken, Performance, Product, ProductTarget, Sale, SaleLine, Stock, User, Vendor, utc_now
 from .notifications import retry_notification
 
 
@@ -462,11 +462,20 @@ def verify_mfa():
             ))
     user.mfa_enabled = True
     db.session.commit()
-    return jsonify({
+    response = jsonify({
         "access_token": authenticated_token(user),
         "user": user_data(user),
         **({"recovery_codes": recovery_codes} if recovery_codes else {}),
     })
+    raw = secrets.token_urlsafe(48)
+    db.session.add(BrowserSession(token_hash=hashlib.sha256(raw.encode()).hexdigest(),
+        user_id=user.id, credential_hash=session_credentials(user),
+        expires_at=utc_now() + timedelta(days=30)))
+    db.session.commit()
+    response.set_cookie("fanmilk_session", raw, max_age=30 * 86400,
+        secure=True, httponly=True, samesite="Strict", path="/api/auth")
+    return response
+
 
 
 @api.post("/auth/forgot-password")
@@ -1342,3 +1351,37 @@ def update_admin_permissions(user_id):
                  "Modification des droits de {}".format(user.name), before, user_data(user))
     db.session.commit()
     return jsonify(user_data(user))
+
+
+def session_credentials(user):
+    return hashlib.sha256((user.password_hash + "|" + (user.mfa_secret or "")).encode()).hexdigest()
+
+
+@api.post("/auth/session")
+def restore_browser_session():
+    # A custom header prevents cross-site form submissions; CORS only permits trusted sites.
+    if request.headers.get("X-FanMilk-Session") != "1":
+        return jsonify({"error": "Requête non autorisée"}), 403
+    raw = request.cookies.get("fanmilk_session", "")
+    saved = BrowserSession.query.filter_by(token_hash=hashlib.sha256(raw.encode()).hexdigest()).first() if raw else None
+    if (not saved or saved.expires_at <= utc_now() or not saved.user.active
+        or not saved.user.mfa_enabled or saved.user.role not in {"administrateur", "depositaire"}
+        or saved.credential_hash != session_credentials(saved.user)):
+        response = jsonify({"error": "Session expirée. Veuillez vous reconnecter."})
+        response.status_code = 401
+        response.delete_cookie("fanmilk_session", path="/api/auth", secure=True, httponly=True, samesite="Strict")
+        return response
+    return jsonify({"access_token": authenticated_token(saved.user), "user": user_data(saved.user)})
+
+
+@api.post("/auth/logout")
+def logout_browser_session():
+    if request.headers.get("X-FanMilk-Session") != "1":
+        return jsonify({"error": "Requête non autorisée"}), 403
+    raw = request.cookies.get("fanmilk_session", "")
+    if raw:
+        BrowserSession.query.filter_by(token_hash=hashlib.sha256(raw.encode()).hexdigest()).delete()
+        db.session.commit()
+    response = jsonify({"ok": True})
+    response.delete_cookie("fanmilk_session", path="/api/auth", secure=True, httponly=True, samesite="Strict")
+    return response
