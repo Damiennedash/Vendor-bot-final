@@ -344,6 +344,19 @@ def sale_data(sale):
     }
 
 
+def sale_stock_data(sale):
+    """One stock declaration per sale; sale review is the only source of status."""
+    data = sale_data(sale)
+    data.update({
+        "sale_id": sale.id,
+        "product": {"sku": " / ".join(line["sku"] for line in data["lines"]),
+                    "name": " · ".join(f'{line["product"]} × {line["quantity"]}' for line in data["lines"])},
+        "quantity": sum(line["quantity"] for line in data["lines"]),
+        "status": {"validee": "valide", "rejetee": "rejete"}.get(sale.status, sale.status),
+    })
+    return data
+
+
 def stock_data(stock):
     return {
         "id": stock.id,
@@ -636,7 +649,7 @@ def read_notification(item_id):
 def depositaire_summary():
     depot_id = current_user().depot_id
     pending_sales = Sale.query.filter_by(depot_id=depot_id, status="en_attente").count()
-    pending_stocks = Stock.query.filter_by(depot_id=depot_id, status="en_attente").count()
+    pending_stocks = pending_sales
     today_sales = db.session.scalar(db.select(func.coalesce(func.sum(Sale.amount), 0)).where(
         Sale.depot_id == depot_id, Sale.status == "validee", func.date(Sale.declared_at) == date.today()
     ))
@@ -696,13 +709,14 @@ def review_sale(sale_id):
 @api.get("/depositaire/stocks")
 @role_required("depositaire")
 def depositaire_stocks():
-    query = Stock.query.filter_by(depot_id=current_user().depot_id)
-    if request.args.get("status"):
-        query = query.filter_by(status=request.args["status"])
-    query = apply_date_filters(query, Stock.declared_at)
+    query = Sale.query.filter_by(depot_id=current_user().depot_id)
+    status = request.args.get("status")
+    if status:
+        query = query.filter_by(status={"valide": "validee", "rejete": "rejetee"}.get(status, status))
+    query = apply_date_filters(query, Sale.declared_at)
     if query is None:
         return jsonify({"error": "Dates invalides"}), 400
-    return jsonify([stock_data(item) for item in query.order_by(Stock.declared_at.desc()).all()])
+    return jsonify([sale_stock_data(item) for item in query.order_by(Sale.declared_at.desc()).all()])
 
 
 @api.get("/depositaire/product-totals")
@@ -730,30 +744,8 @@ def depositaire_product_breakdown():
 @api.patch("/depositaire/stocks/<int:stock_id>")
 @role_required("depositaire")
 def review_stock(stock_id):
-    user = current_user()
-    stock = Stock.query.filter_by(id=stock_id, depot_id=user.depot_id).first_or_404()
-    if stock.status != "en_attente":
-        return jsonify({"error": "Ce stock a deja ete traite"}), 409
-    payload = request.get_json(silent=True) or {}
-    action = payload.get("action")
-    reason = str(payload.get("reason", "")).strip()
-    if action not in {"validate", "reject"}:
-        return jsonify({"error": "Action invalide"}), 400
-    if action == "reject" and not reason:
-        return jsonify({"error": "Le motif de rejet est obligatoire"}), 400
-    before = {"status": stock.status, "rejection_reason": stock.rejection_reason}
-    stock.status = "valide" if action == "validate" else "rejete"
-    stock.rejection_reason = reason or None
-    stock.reviewed_at = utc_now()
-    stock.reviewed_by = user.id
-    record_audit(user, "validation" if action == "validate" else "rejet", "stock", stock.id,
-                 "Stock {} de {}".format(stock.id, stock.vendor.name), before,
-                 {"status": stock.status, "rejection_reason": stock.rejection_reason})
-    db.session.commit()
-    message = "Votre stock a ete valide." if action == "validate" else "Votre stock a ete rejete. Motif : " + reason
-    from .whatsapp import send_message
-    send_message(stock.vendor_phone, message)
-    return jsonify(stock_data(stock))
+    Sale.query.filter_by(id=stock_id, depot_id=current_user().depot_id).first_or_404()
+    return jsonify({"error": "Validez ou rejetez la vente associée dans la rubrique Ventes. Son stock suit automatiquement la même décision."}), 409
 
 
 @api.get("/depositaire/performances")
@@ -795,8 +787,7 @@ def depositaire_difficulties():
 def depositaire_history():
     depot_id = current_user().depot_id
     sales = Sale.query.filter(Sale.depot_id == depot_id, Sale.status != "en_attente").order_by(Sale.declared_at.desc()).all()
-    stocks = Stock.query.filter(Stock.depot_id == depot_id, Stock.status != "en_attente").order_by(Stock.declared_at.desc()).all()
-    return jsonify({"sales": [sale_data(item) for item in sales], "stocks": [stock_data(item) for item in stocks]})
+    return jsonify({"sales": [sale_data(item) for item in sales], "stocks": [sale_stock_data(item) for item in sales]})
 
 
 @api.get("/admin/summary")
@@ -1124,16 +1115,16 @@ def admin_sales():
 @api.get("/admin/stocks")
 @role_required("administrateur")
 def admin_stocks():
-    query = Stock.query
+    query = Sale.query
     depot_id = requested_depot_id()
     if depot_id == -1:
         return jsonify({"error": "Dépôt invalide"}), 400
     if depot_id:
         query = query.filter_by(depot_id=depot_id)
-    query = apply_date_filters(query, Stock.declared_at)
+    query = apply_date_filters(query, Sale.declared_at)
     if query is None:
         return jsonify({"error": "Dates invalides"}), 400
-    return jsonify([stock_data(item) for item in query.order_by(Stock.declared_at.desc()).all()])
+    return jsonify([sale_stock_data(item) for item in query.order_by(Sale.declared_at.desc()).all()])
 
 
 @api.get("/admin/depots")
